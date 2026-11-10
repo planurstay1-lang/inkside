@@ -1,0 +1,1265 @@
+<!doctype html>
+<!-- Drawing engine: Colorfigures, used under the MIT licence below.
+MIT License
+
+Copyright (c) 2026 April Zhu (Colorfigures: colour, hand-drawn style, 3D props, template, examples)
+Copyright (c) 2026 April Zhu (iso-glow, on which Colorfigures is based)
+Copyright (c) 2026 Tolga Cohce (iso-figure, on which iso-glow is based)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+-->
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Stapler</title><style>.mcap{display:none!important}@media (max-width:560px){.stat .v{font-size:20px!important}.stats{align-items:flex-end}}@media (min-width:561px){.vset{top:4px!important}#stats{top:var(--vset-h,44px)!important}}</style><style>@media (max-width:560px){body > header{display:none}}</style><script>window.FIG_A = () => innerWidth <= 560 ? 1.1 : .75;</script><script>window.LBL_U = () => { if (innerWidth > 560) return 0; const s = document.getElementById("fig"); return s && s.clientWidth && s.viewBox.baseVal.width ? s.viewBox.baseVal.width / s.clientWidth : 0; };</script></head><body>
+<script>
+/* ============================================================
+   Colorfigures core: projection, shapes, shading, ink, labels, page shell.
+   A figure page includes this file (scripts/build.py inlines it), then calls mountFigure({...}).
+   See SKILL.md for the drawing contract and conventions.
+   One fixed view (front-left-top) and one fixed light (from above, behind the viewer's right shoulder: the front is lit,
+   the left side is in shade, and cast shadows fall toward the lower left of the screen).
+   ============================================================ */
+
+/* ---------- palettes ---------- */
+const PALS = {
+  mustard: { l:'#f4b829', m:'#d49c1f', d:'#4e4a18' },
+  tomato:  { l:'#ef6a4c', m:'#cf5038', d:'#4a2219' },
+  mint:    { l:'#93d3b0', m:'#71b693', d:'#1f4034' },
+  cobalt:  { l:'#76a0e2', m:'#5a82c6', d:'#1c2948' },
+  blush:   { l:'#f3a6bb', m:'#d8869c', d:'#4b2430' },
+};
+const METAL   = { l:'#eef0f0', m:'#c6ccce', d:'#8f989b' };
+const CLEAR   = { l:'#e4f2f4', m:'#c4dfe4', d:'#97b9c0' };
+const CERAMIC = { l:'#fbfaf3', m:'#e3e0d2', d:'#bdb8a6' };
+const DARK    = { l:'#55504a', m:'#3d3935', d:'#272421' };
+const INK = '#231e16';
+const SHADOW = '#41538f';
+
+/* ---------- projection (x = depth toward viewer-right, y = toward viewer-left, z = up) ---------- */
+const C = Math.cos(Math.PI/6), S = Math.sin(Math.PI/6);
+let OX = 0, OY = 0;
+/* Free orthographic camera (internal names start with CAM_ / cam so they never clash with a figure's own names). YAW turns the viewer around the vertical axis (45° = the classic front-left view),
+   PITCH is how far it looks down (35.26° = true isometric). At the defaults P() is exactly the old isometric
+   projection, so every figure drawn for it still lines up. Drag the figure to orbit; double-click to reset.
+   rotV(n) maps a world direction into the default view's frame, so vis / tone / any "sum of rotV > 0" test keep
+   working at every angle: the viewer is always (1,1,1) and the light stays put relative to the viewer. */
+let VIEW = 0, RC = [0, 0], RCZ = 0;
+const VIEW_NAMES = ['front', 'left side', 'back', 'right side'];
+const TURNS = [0, 2];
+const YAW0 = 45, PITCH0 = Math.atan(1/Math.SQRT2) * 180/Math.PI, CAM_K = Math.sqrt(1.5);
+let YAW = YAW0, PITCH = PITCH0, CAM_R, CAM_U, CAM_V, CAM_D;                       // right, up, toward viewer, screen-down
+const camBasis = (yaw, pitch) => { const t = yaw*Math.PI/180, p = pitch*Math.PI/180, ct = Math.cos(t), st = Math.sin(t), cp = Math.cos(p), sp2 = Math.sin(p);
+  return { R:[st,-ct,0], U:[-sp2*ct,-sp2*st,cp], V:[cp*ct,cp*st,sp2] }; };
+const CAM_B0 = camBasis(YAW0, PITCH0);
+// CAM_LIM: how far (deg) the camera may turn either side of the front view; null = all the way round (set per figure)
+let CAM_LIM = null;
+function setCam(yaw, pitch){ YAW = CAM_LIM == null ? yaw : Math.max(YAW0 - CAM_LIM, Math.min(YAW0 + CAM_LIM, yaw));
+  PITCH = CAM_LIM == null ? Math.max(6, Math.min(78, pitch)) : Math.max(15, Math.min(62, pitch)); const b = camBasis(YAW, PITCH); CAM_R = b.R; CAM_U = b.U; CAM_V = b.V; CAM_D = CAM_U.map(v => -v); }
+setCam(YAW0, PITCH0);
+const camDot = (a,b) => a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const rotV = n => { const r = camDot(n,CAM_R), u = camDot(n,CAM_U), v = camDot(n,CAM_V); return [0,1,2].map(i => CAM_B0.R[i]*r + CAM_B0.U[i]*u + CAM_B0.V[i]*v); };
+// the light's ground direction turns with the viewer's yaw only (shadows always fall toward the lower left of the screen)
+const yawTurn = ([x,y]) => { const t = (YAW - YAW0)*Math.PI/180, c = Math.cos(t), s = Math.sin(t); return [x*c - y*s, x*s + y*c]; };
+const rotXY = (x,y) => [x, y];                                                // kept for old callers
+const P0 = (x,y,z) => [(x-y)*C + OX, (x+y)*S - z + OY];                       // raw iso
+const P  = (x,y,z) => { const q = [x-RC[0], y-RC[1], z-RCZ];
+  return [CAM_K*camDot(q,CAM_R) + (RC[0]-RC[1])*C + OX, CAM_K*camDot(q,CAM_D) + (RC[0]+RC[1])*S - RCZ + OY]; };
+const Dv = (x,y,z) => [CAM_K*camDot([x,y,z],CAM_R), CAM_K*camDot([x,y,z],CAM_D)];
+// distance toward the viewer: draw parts with smaller depth first
+const depthOf = p => camDot(p, CAM_V);
+// sort [{at:[x,y,z], svg}] back-to-front for the current camera. A part may also give box:[[x0,y0,z0],[x1,y1,z1]]:
+// when two boxes are separated along x, y or z, the one on the viewer's side goes last (a centre point alone gets long
+// or wrapping parts wrong: a pole beside a row of keys, a spout reaching past a cup).
+const boxMid = b => [0,1,2].map(k => (b[0][k] + b[1][k]) / 2);
+const sepOrder = (p, q) => { if (!p.box || !q.box) return 0;
+  for (let k = 0; k < 3; k++){ if (p.box[1][k] <= q.box[0][k] + 1e-6) return CAM_V[k] >= 0 ? -1 : 1; if (q.box[1][k] <= p.box[0][k] + 1e-6) return CAM_V[k] >= 0 ? 1 : -1; }
+  return 0; };
+const byDepth = parts => parts.filter(Boolean).sort((p,q) => sepOrder(p,q) || (depthOf(p.at || boxMid(p.box)) - depthOf(q.at || boxMid(q.box)))).map(p => p.svg).join('');
+// the half of a vertical ring that faces the viewer / is turned away, as [from, to] angles in degrees (0 = +x, 90 = +y)
+const nearHalf = () => [YAW - 90, YAW + 90], farHalf = () => [YAW + 90, YAW + 270];
+// an open container (cup, bin, cone, drum) between two rings: far inner wall, then its contents, then the near outer wall
+const openShell = (A, B, colour, contents = '') => loft(A, B, colour, true) + contents + loft(A, B, colour);
+const f  = v => v.toFixed(1);
+const pd = (pts, close=true) => 'M' + pts.map(p => { const q = P(p[0],p[1],p[2]); return f(q[0])+' '+f(q[1]); }).join('L') + (close ? 'Z' : '');
+const sp = pts => 'M' + pts.map(q => f(q[0])+' '+f(q[1])).join('L') + 'Z';
+
+/* ---------- 2D shapes in a plane's (u,v) coords (v up), mapped to 3D by a plane ---------- */
+const arcUV  = (cu,cv,r,a0,a1,n=7) => { const o=[]; for (let i=0;i<=n;i++){ const a=(a0+(a1-a0)*i/n)*Math.PI/180; o.push([cu+r*Math.cos(a), cv+r*Math.sin(a)]); } return o; };
+const rrUV   = (u0,v0,u1,v1,r,n=7) => r <= 0 ? rectUV(u0,v0,u1,v1) : [...arcUV(u1-r,v0+r,r,-90,0,n), ...arcUV(u1-r,v1-r,r,0,90,n), ...arcUV(u0+r,v1-r,r,90,180,n), ...arcUV(u0+r,v0+r,r,180,270,n)];
+const rectUV = (u0,v0,u1,v1) => [[u0,v0],[u1,v0],[u1,v1],[u0,v1]];
+const ellUV  = (cu,cv,ru,rv,n=24) => Array.from({length:n}, (_,i) => { const a=i/n*2*Math.PI; return [cu+ru*Math.cos(a), cv+rv*Math.sin(a)]; });
+const PX = x => ([u,v]) => [x,u,v];      // front-facing plane x = const   (u = y, v = z)
+const PY = y => ([u,v]) => [u,y,v];      // side plane y = const           (u = x, v = z)
+const PZ = z => ([u,v]) => [u,v,z];      // horizontal plane z = const     (u = x, v = y)
+const on = (plane, uv) => uv.map(plane);
+
+/* ---------- vectors + shading ---------- */
+const sub=(a,b)=>[a[0]-b[0],a[1]-b[1],a[2]-b[2]], dot=(a,b)=>a[0]*b[0]+a[1]*b[1]+a[2]*b[2];
+const cross=(a,b)=>[a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]];
+const norm=a=>{ const l=Math.hypot(...a)||1; return a.map(v=>v/l); };
+const avg=ps=>ps.reduce((s,p)=>[s[0]+p[0]/ps.length,s[1]+p[1]/ps.length,s[2]+p[2]/ps.length],[0,0,0]);
+const vis = n => { const r = rotV(n); return r[0]+r[1]+r[2] > 1e-6; };   // viewer looks from (+1,+1,+1) after the turn
+const facing = vis;                                                       // readable alias: is this face toward the viewer?
+const SHADOW_K = 0.85, AZ_MIN = 20, AZ_MAX = 160;
+// cast shadows are drawn shorter than the shading light implies (0.45 × height instead of 0.85 ×): long shadows of tall
+// parts on thin supports (a lamp shade, a fan head) land far from the object and read as separate blobs
+const SHADOW_LEN = 0.45;
+let L = [0,0,1], SH = [0,0];
+function setLight(deg){ const a=deg*Math.PI/180; SH=[SHADOW_K*Math.cos(a), SHADOW_K*Math.sin(a)]; L=norm([-SH[0],-SH[1],1]); }
+const LIN = norm([.6,.2,1]);                       // fixed light for interiors / small props
+// Three flat tones, but blended across a narrow band at each step, so a face that turns past a threshold while the
+// figure rotates fades between tones instead of snapping (at rest almost every face still sits on a pure tone).
+const SOFT = .18;
+const step3 = (d, hi, lo, m) => { const ss = (a, b, x) => { const k = Math.min(1, Math.max(0, (x - a)/(b - a))); return k*k*(3 - 2*k); };
+  const a = ss(hi - SOFT, hi + SOFT, d), b = ss(lo - SOFT, lo + SOFT, d);
+  return a >= 1 ? m.l : b <= 0 ? m.d : a > 0 ? mix(m.m, m.l, a) : b < 1 ? mix(m.d, m.m, b) : m.m; };
+const tone  = (n,m) => step3(dot(rotV(n),L),   -.15, -.45, m);   // exterior, follows the sun
+const toneI = (n,m) => step3(dot(rotV(n),LIN),  .6,   .05, m);   // interior / props
+const mix = (a,b,t) => '#' + [1,3,5].map(i => Math.round(parseInt(a.substr(i,2),16)*(1-t) + parseInt(b.substr(i,2),16)*t).toString(16).padStart(2,'0')).join('');
+const matOf = hex => ({ l:hex, m:mix(hex,'#000000',.16), d:mix(hex,'#000000',.42) });
+const ease = t => t<.5 ? 2*t*t : 1-Math.pow(-2*t+2,2)/2;
+
+/* ---------- drawing primitives (all return SVG strings) ---------- */
+const ink   = (d,w=1.0) => `<path d="${d}" fill="none" stroke="${INK}" stroke-width="${w}" stroke-linejoin="round" stroke-linecap="round"/>`;
+const fill  = (d,c,extra='') => `<path d="${d}" fill="${c}" ${extra}/>`;
+const face  = (d,c) => `<path d="${d}" fill="${c}" stroke="${c}" stroke-width=".7" stroke-linejoin="round"/>`;
+const shape = (pts,c,w=.9) => fill(pd(pts),c) + (w ? ink(pd(pts),w) : '');
+const line  = (pts,w=.9) => ink(pd(pts,false),w);
+// Loft between two rings of equal length (closed). colour(n) picks each strip's fill; flip = seen from inside.
+function loft(A, B, colour, flip=false){
+  const n=A.length, cen=avg(A.concat(B)); let s='';
+  for (let i=0;i<n;i++){
+    const a0=A[i], a1=A[(i+1)%n], b1=B[(i+1)%n], b0=B[i];
+    let nr = norm(cross(sub(a1,a0), sub(b0,a0)));
+    if (!isFinite(nr[0])) continue;
+    if (dot(nr, sub(avg([a0,a1,b1,b0]), cen)) < 0) nr = nr.map(v=>-v);
+    if (flip) nr = nr.map(v=>-v);
+    if (vis(nr)) s += face(pd([a0,a1,b1,b0]), colour(nr));
+  }
+  return s;
+}
+function hull(pts){
+  pts = pts.slice().sort((a,b)=>a[0]-b[0]||a[1]-b[1]);
+  const cr=(o,a,b)=>(a[0]-o[0])*(b[1]-o[1])-(a[1]-o[1])*(b[0]-o[0]); const lo=[], up=[];
+  for (const p of pts){ while(lo.length>=2 && cr(lo[lo.length-2],lo[lo.length-1],p)<=0) lo.pop(); lo.push(p); }
+  for (const p of pts.reverse()){ while(up.length>=2 && cr(up[up.length-2],up[up.length-1],p)<=0) up.pop(); up.push(p); }
+  lo.pop(); up.pop(); return lo.concat(up);
+}
+// Silhouette ink, weighted by how thick the part is on screen (like a hand inker): the w you pass is the most it gets.
+// Thickness = 2 × area / perimeter of the outline (a rod's diameter, about half a box's width), as a share of the
+// frame width. A long thin rod, a handle or a knob stays light (~1–1.5); a grinder, kettle or machine body gets the
+// heavy ~2.4–2.8. Thin parts stay thin and parts keep air between them.
+const hullInk = (pts3, w=1.4) => { const h = hull(pts3.map(p=>P(...p))); let a = 0, per = 0;
+  for (let i = 0; i < h.length; i++){ const p = h[i], q = h[(i+1) % h.length]; a += p[0]*q[1] - q[0]*p[1]; per += Math.hypot(q[0]-p[0], q[1]-p[1]); }
+  const thick = per ? Math.abs(a) / per / (INK_K * INK_REF_VB) : 0;
+  return ink(sp(h), Math.min(w, .9 + 20*thick)); };
+// Axis-aligned box: three visible faces, shaded, each outlined. shade = tone (sunlit) or toneI (interior).
+function box(x0,y0,z0,x1,y1,z1,m,shade=toneI,w=.9){
+  // all six faces, drawn only when they face the viewer (sides first, then top) — correct in every VIEW
+  const F = [
+    [[0,1,0],  [[x0,y1,z0],[x1,y1,z0],[x1,y1,z1],[x0,y1,z1]]],
+    [[1,0,0],  [[x1,y0,z0],[x1,y1,z0],[x1,y1,z1],[x1,y0,z1]]],
+    [[0,-1,0], [[x0,y0,z0],[x1,y0,z0],[x1,y0,z1],[x0,y0,z1]]],
+    [[-1,0,0], [[x0,y0,z0],[x0,y1,z0],[x0,y1,z1],[x0,y0,z1]]],
+    [[0,0,1],  [[x0,y0,z1],[x1,y0,z1],[x1,y1,z1],[x0,y1,z1]]] ];
+  return F.filter(([n]) => vis(n)).map(([n,q]) => shape(q, shade(n,m), w)).join('');
+}
+// Rounded-profile extrusion: profile (u=y, v=z) swept along x from x0 to x1. Body of most machines.
+function extrude(profileUV, x0, x1, m, shade=tone){ return loft(on(PX(x0),profileUV), on(PX(x1),profileUV), n=>shade(n,m)); }
+// Vertical cylinder (axis z) centred (x,y), radius r from z0 to z1, with top cap.
+function cyl(x,y,z0,z1,r,m,shade=toneI,w=1.2,n=24){
+  const A=on(PZ(z0),ellUV(x,y,r,r,n)), B=on(PZ(z1),ellUV(x,y,r,r,n));
+  return loft(A,B,nr=>shade(nr,m)) + fill(pd(B),shade([0,0,1],m)) + hullInk([...A,...B],w) + ink(pd(B),w*.8);
+}
+// Cylinder lying along x (e.g. a knob or dial sticking out of a front face): centred (y,z), from x0 to x1.
+function cylX(x0,x1,y,z,r,m,shade=toneI,w=1.1,n=20){
+  const A=on(PX(x0),ellUV(y,z,r,r,n)), B=on(PX(x1),ellUV(y,z,r,r,n));
+  // cap on whichever end faces the viewer (the +x end in VIEW 0)
+  const capB = vis([1,0,0]), cap = capB ? B : A, cn = capB ? [1,0,0] : [-1,0,0];
+  return loft(A,B,nr=>shade(nr,m)) + (vis(cn) ? fill(pd(cap),shade(cn,m)) : '') + hullInk([...A,...B],w) + (vis(cn) ? ink(pd(cap),w*.8) : '');
+}
+// Cylinder between any two 3D points a and b (a lamp arm, a rod, a pipe at an angle, a handle bar), radius r.
+// The end facing the viewer gets a cap. For a tapered part (a cone, a lamp shade) pass r1 for the radius at b.
+function rod(a, b, r, m, shade=toneI, w=1, r1=r, n=16){
+  const d = norm(sub(b, a)), u = norm(cross(d, Math.abs(d[2]) < .9 ? [0,0,1] : [1,0,0])), v = cross(d, u);
+  const ring = (p, rr) => Array.from({length:n}, (_,i) => { const t = i/n*2*Math.PI, c = Math.cos(t)*rr, s2 = Math.sin(t)*rr;
+    return [p[0] + u[0]*c + v[0]*s2, p[1] + u[1]*c + v[1]*s2, p[2] + u[2]*c + v[2]*s2]; });
+  const A = ring(a, r), B = ring(b, r1), capB = vis(d), cap = capB ? B : A, cn = capB ? d : d.map(x => -x);
+  return loft(A, B, nr => shade(nr, m)) + (Math.max(r, r1) > 0 ? fill(pd(cap), shade(cn, m)) + ink(pd(cap), w*.8) : '') + hullInk([...A, ...B], w);
+}
+// Text lying flat on a front plane x = const, centred at (y,z) baseline; reads left-to-right on screen.
+// text sits on a face: if its reading direction comes out mirrored (or edge-on), that face is turned away, so the text is hidden
+const txM = (o, U, V) => (U[0]*V[1] - U[1]*V[0]) <= .02 * Math.hypot(...U) * Math.hypot(...V) ? `matrix(0 0 0 0 ${f(o[0])} ${f(o[1])})` : `matrix(${U[0].toFixed(4)} ${U[1].toFixed(4)} ${V[0].toFixed(4)} ${V[1].toFixed(4)} ${f(o[0])} ${f(o[1])})`;
+const tx = (x,y,z,str,size,col=INK,weight=700) => { const o=P(x,y,z);
+  return `<text transform="${txM(o, Dv(0,-1,0), Dv(0,0,-1))}" font-size="${size}" fill="${col}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="${weight}" letter-spacing=".04em">${str}</text>`; };
+// Text on a side plane y = const, centred at (x,z).
+const txY = (x,y,z,str,size,col=INK,weight=700) => { const o=P(x,y,z);
+  return `<text transform="${txM(o, Dv(1,0,0), Dv(0,0,-1))}" font-size="${size}" fill="${col}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="${weight}" letter-spacing=".04em">${str}</text>`; };
+// Cast shadow of a set of 3D points (any outline of the object), pushed along the light onto z = 0.
+// the light stays put relative to the viewer, so the shadow is cast in turned coordinates
+// z0: the surface it falls on (a board, a counter); clip it to that surface with clipTo(...) if it could spill off.
+// clip: the 3D outline of the surface it falls on (e.g. boardTop(...)), so it can't spill over the edge.
+const castShadow = (pts3, z0=0, clip=null) => { const k = SHADOW_LEN / SHADOW_K, [sx, sy] = yawTurn(SH);
+  const s = fill(sp(hull(pts3.map(([x,y,z]) => P(x+(z-z0)*sx*k, y+(z-z0)*sy*k, z0)))), SHADOW);
+  return clip ? clipTo(clip, s) : s; };
+// A board for the object to stand on (a tray, a desk top, a counter): a rounded slab from (x0,y0) to (x1,y1), h thick.
+// Draw it first; then castShadow(points, h, boardTop(x0,y0,x1,y1,h,r)) so shadows lie on it and stop at its edge.
+const BOARD = { l:'#e6e1d4', m:'#cfc8b8', d:'#aaa293' }, WOOD = { l:'#d9a86c', m:'#bf8a4f', d:'#8e6236' };
+const boardTop = (x0,y0,x1,y1,h=3,r=5) => on(PZ(h), rrUV(x0,y0,x1,y1,r));
+function board(x0,y0,x1,y1,h=3,r=5,m=BOARD){
+  const A = on(PZ(0), rrUV(x0,y0,x1,y1,r)), B = boardTop(x0,y0,x1,y1,h,r);
+  return loft(A, B, n => toneI(n, m)) + fill(pd(B), m.l) + ink(pd(B), 1) + hullInk([...A, ...B], 1.8);
+}
+// Group helpers: clickable target, clip to an opening.
+const act  = (name, inner, data='') => `<g data-act="${name}" ${data}>${inner}</g>`;
+let _clipN = 0;
+// Part label (for "how does it work" figures): a cream pill with a leader line to a 3D point on the part.
+// dx, dy = where the pill sits, in screen units at the reference zoom (they scale with the figure like stroke widths).
+// on = that part is working right now (the pill turns the accent colour). Labels can be hidden with the Labels switch.
+function tag(p3, dx, dy, text, on=false){
+  // on a phone (LBL_U = drawing units per screen px) the pill is a numbered badge and the names go in a legend under the figure
+  const u = window.LBL_U ? LBL_U() : 0, n = ((window.__ln || (window.__ln = {}))[text] || (__ln[text] = Object.keys(__ln).length + 1));
+  const k = INK_K, [X,Y] = P(...p3), fs = u ? 10*u : 8.6*k, h = u ? 17*u : fs*1.8, w = u ? h*(n > 9 ? 1.3 : 1) : text.length*fs*.62 + fs*1.5, cx = X + dx*k, cy = Y + dy*k;
+  return `<g class="tag${on ? ' on' : ''}" data-n="${n}" data-t="${text}"><path d="M${f(X)} ${f(Y)}L${f(cx)} ${f(cy)}" fill="none" stroke="${INK}" stroke-width="1"/>`
+    + `<circle cx="${f(X)}" cy="${f(Y)}" r="${f(1.3*k)}" fill="${INK}"/>`
+    + `<rect x="${f(cx-w/2)}" y="${f(cy-h/2)}" width="${f(w)}" height="${f(h)}" rx="${f(h/2)}" fill="${on ? 'var(--accent,#f4b829)' : '#fff4d6'}" stroke="${INK}" stroke-width="1.2"/>`
+    + `<text x="${f(cx)}" y="${f(cy+fs*.36)}" font-size="${f(fs)}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="800" letter-spacing=".04em" fill="${INK}">${u ? n : text}</text></g>`;
+}
+const clipTo = (pts3, inner) => { const id = 'k' + (++_clipN); return `<clipPath id="${id}"><path d="${pd(pts3)}"/></clipPath><g clip-path="url(#${id})">${inner}</g>`; };
+
+/* ---------- constant on-screen line weight ----------
+   Stroke widths are written in model units, and each figure is zoomed to fill the frame, so a small
+   object would get fat lines. INK_K rescales every stroke-width (and the wobble/grain filter) so all
+   figures match the reference zoom of the booth / vending machine (viewBox ≈ 585 units wide). */
+const INK_REF_VB = 585;
+let INK_K = 1;
+const inkScale = svg => INK_K === 1 ? svg : svg.replace(/stroke-width="([\d.]+)"/g, (_, w) => `stroke-width="${(+w * INK_K).toFixed(2)}"`);
+
+/* ---------- page shell ---------- */
+const CORE_CSS = `
+  :root{--paper:#f2efe7;--ink:#231e16;--muted:#857d6e;--rule:#ddd6c8}
+  *{box-sizing:border-box} html,body{margin:0;height:100%}
+  body{background-color:var(--paper);
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='320' height='320'><filter id='p'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/><feColorMatrix values='0 0 0 0 .42  0 0 0 0 .39  0 0 0 0 .33  .16 0 0 0 0'/></filter><rect width='100%' height='100%' filter='url(%23p)'/></svg>");
+    overflow-x:hidden;color:var(--ink);font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;display:flex;flex-direction:column;align-items:center;padding:24px 16px 32px}
+  header{width:100%;max-width:760px;display:flex;justify-content:space-between;align-items:baseline;gap:12px;flex-wrap:wrap}
+  header h1{font-size:13px;font-weight:600;margin:0;letter-spacing:.02em} header span{color:var(--muted)}
+  #fig{width:100%;max-width:760px;height:auto;display:block;margin:4px 0 8px;user-select:none;overflow:visible}
+  #fig{cursor:grab;touch-action:pan-y} #fig.drag{cursor:grabbing} #fig [data-act]{cursor:pointer}
+  #readout, .idea{display:none}   /* status line + big idea are off: the buttons and motion tell the story */
+  .idea{width:100%;max-width:760px;margin:-6px 0 16px;font-size:12.5px;line-height:1.5;text-align:center;color:var(--ink)}
+  .idea strong{letter-spacing:.12em;text-transform:uppercase;font-size:11px;margin-right:8px}
+  #readout{position:relative;min-height:1.4em;letter-spacing:.08em;text-transform:uppercase;margin-bottom:14px;text-align:center;text-shadow:0 0 3px var(--paper),0 0 6px var(--paper),0 0 10px var(--paper)}
+  .stage{position:relative;width:100%;max-width:760px}
+  .actions{position:absolute;top:4px;left:0;display:flex;flex-direction:column;align-items:flex-start;gap:8px;z-index:2;max-width:220px}
+  .actions .cap{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase;margin:0 0 2px}
+  html.nolabels #fig .tag{display:none}
+  .ctl[hidden]{display:none}
+  /* ui.flash(text): a short note under the buttons ("the can is empty — refill it"); the status line itself stays hidden */
+  .toast{position:absolute;left:0;z-index:3;font-size:11.5px;letter-spacing:.06em;text-transform:uppercase;background:var(--paper);
+    border:1.5px solid var(--ink);border-radius:8px;padding:4px 9px;box-shadow:2px 2px 0 var(--ink);opacity:0;transition:opacity .2s;pointer-events:none;max-width:240px}
+  .toast.show{opacity:1}
+  .made-with{width:100%;max-width:760px;margin-top:18px;text-align:right;font-size:11px;letter-spacing:.1em;text-transform:uppercase}
+  .made-with a{color:var(--muted);text-decoration:none} .made-with a:hover{color:var(--ink)}
+  .stats{position:absolute;top:4px;right:0;display:flex;flex-direction:column;align-items:flex-end;gap:10px;z-index:2;text-align:right}
+  .stat .k{font-size:11px;font-weight:700;letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+  .stat .v{font-size:34px;font-weight:800;line-height:1.05;letter-spacing:-.01em;font-variant-numeric:tabular-nums;color:var(--ink)}
+  .stat.small .v{font-size:20px}
+  .stat .v.bump{animation:bump .35s ease-out}
+  @keyframes bump{0%{transform:scale(1.18)}100%{transform:none}}
+  .stepwrap{position:relative;display:flex;align-items:center;gap:8px}
+  .act{font:inherit;color:var(--ink);background:var(--paper);border:1.5px solid var(--ink);border-radius:999px;padding:5px 14px;cursor:pointer;white-space:nowrap}
+  .act:hover{background:color-mix(in srgb,var(--paper) 92%,var(--ink))}
+  .act .car{margin-left:6px;font-size:10px}
+  .act:focus-visible{outline:2px solid var(--ink);outline-offset:3px}
+  .chips{display:none;flex-wrap:wrap;gap:6px;background:var(--paper);border:2px solid var(--ink);border-radius:12px;box-shadow:3px 3px 0 var(--ink);
+    padding:8px;width:max-content;max-width:min(300px,62vw);position:absolute;left:calc(100% + 10px);top:-4px;z-index:3}
+  .stepwrap.open .chips{display:flex}
+  .chip{white-space:nowrap;font:inherit;font-size:11.5px;font-weight:700;color:var(--ink);background:var(--paper);border:1.5px solid var(--ink);border-radius:8px;padding:4px 8px;cursor:pointer;box-shadow:2px 2px 0 var(--ink)}
+  .chip:hover{background:var(--accent,#f4b829);transform:translate(-1px,-1px)}
+  .chip.current{background:var(--ink);color:var(--paper)} .chip.current:hover{background:var(--ink);transform:none}
+  .chip.off{opacity:.45} .chip.off:hover{transform:none;background:var(--paper)}
+  
+  @media (max-width:560px){body{padding:14px 12px 24px}header span,.actions .cap{display:none}.actions{flex-direction:row;flex-wrap:wrap;gap:6px}.act{font-size:12px;padding:4px 11px}.stats{position:static;flex-direction:row;justify-content:flex-end;gap:18px;margin-bottom:4px}.actions{position:static;max-width:none;margin:6px 0 4px}.chips{left:0;top:calc(100% + 8px)}}
+  .controls{width:100%;max-width:760px;display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px 28px;border-top:1px solid var(--rule);padding-top:16px}
+  .ctl{display:flex;flex-direction:column;gap:6px}
+  .ctl label{color:var(--muted);font-size:11px;letter-spacing:.08em;text-transform:uppercase}
+  input[type=range]{width:100%;accent-color:var(--ink)}
+  .row{display:flex;gap:8px;flex-wrap:wrap}
+  button{font:inherit;color:var(--ink);background:transparent;border:1.5px solid var(--ink);border-radius:999px;padding:5px 14px;cursor:pointer}
+  button:hover{background:#0000000d}
+  button[aria-pressed=true]:not(.sw){background:var(--ink);color:var(--paper)}
+  .sw{width:26px;height:26px;padding:0;border-radius:50%} .sw[aria-pressed=true]{outline:2px solid var(--ink);outline-offset:2px}`;
+
+const filterFor = k => `<filter id="hand" x="-3%" y="-3%" width="106%" height="106%" color-interpolation-filters="sRGB">
+  <feTurbulence type="fractalNoise" baseFrequency="${(0.045/k).toFixed(4)}" numOctaves="2" seed="4" result="warp"/>
+  <feDisplacementMap id="wob" in="SourceGraphic" in2="warp" scale="${(2.4*k).toFixed(2)}" xChannelSelector="R" yChannelSelector="G" result="wob"/>
+  <feTurbulence type="fractalNoise" baseFrequency="${(0.9/k).toFixed(4)}" numOctaves="3" seed="11" result="n1"/>
+  <feColorMatrix in="n1" type="matrix" values=".3 0 0 0 .84  .3 0 0 0 .84  .3 0 0 0 .84  0 0 0 0 1" result="grain"/>
+  <feTurbulence type="fractalNoise" baseFrequency="${(0.012/k).toFixed(4)}" numOctaves="2" seed="7" result="n2"/>
+  <feColorMatrix in="n2" type="matrix" values=".3 0 0 0 .85  .3 0 0 0 .85  .3 0 0 0 .85  0 0 0 0 1" result="blot"/>
+  <feBlend in="wob" in2="grain" mode="multiply" result="g1"/><feBlend in="g1" in2="blot" mode="multiply" result="g2"/>
+  <feComposite in="g2" in2="wob" operator="in"/></filter>`;
+
+/* mountFigure({
+     fig:'03', title:'Photo booth', hint:'click the curtain…',
+     size:[W,D,H],                 // bounding box, used to frame the view (shadow range included)
+     palette:'mustard',            // default PALS key
+     state:{...},                  // figure state (st.pal is built in)
+     scene: (st, m) => svgString,  // m = current palette {l,m,d}
+     readout: st => 'text',        // status line under the figure
+     buttons: [{label, onClick(st, ui)}      // listed in the order the user should do them
+               | {label, choices: st => [{label, onClick(st,ui), current?, disabled?, why?}]}],   // opens a picker
+     stats: st => [{label, value, small?}],   // optional: big numbers top-right (credit, change, score)
+     credit: false,                // optional: hide the small "Made with Colorfigures" link
+     acts: { name(st, el, ui){} },  // clicks on act(name, …) groups; el has dataset
+     params(st, q){}               // optional: read URLSearchParams for screenshot states
+   })  -> ui = { st, render, animate(stepFn), flash(text,ms) }
+   animate(step): calls step(dt seconds) every frame and re-renders until step returns false. */
+addEventListener('error', e => { document.documentElement.dataset.errors = (document.documentElement.dataset.errors || '') + ' ' + e.message + ';'; });
+/* The hand-drawn filter's noise never changes, but browsers recompute every feTurbulence each time the drawing changes
+   (on phones SVG filters run on the CPU, so this is most of the cost of a frame). bakeNoise renders each noise layer once
+   into an image and swaps it in: coarse layers as one small image over the whole view (they are smooth, so scaling up
+   is invisible), fine grain as a seamless tile. If anything fails (an old browser), the live filter simply stays. */
+function bakeNoise(svg){
+  const fl = document.getElementById('hand'); if (!fl || typeof Image === 'undefined') return;
+  const NS = 'http://www.w3.org/2000/svg', vb = svg.viewBox.baseVal;
+  const x0 = vb.x - vb.width*.35, y0 = vb.y - vb.height*.35, w0 = vb.width*1.7, h0 = vb.height*1.7;
+  for (const t of [...fl.querySelectorAll('feTurbulence')]){
+    const fq = parseFloat(t.getAttribute('baseFrequency')), oct = +(t.getAttribute('numOctaves') || 1);
+    if (!(fq > 0)) continue;
+    const fine = fq * Math.max(w0, h0) > 80;
+    if (fine) continue;   // fine grain stays live: a repeated tile leaves faint seams on some GPUs
+    const rx = fine ? 0 : x0, ry = fine ? 0 : y0, rw = fine ? 48 / fq : w0, rh = fine ? 48 / fq : h0;
+    const ppu = fq * (fine ? 7 : 5) * Math.pow(2, Math.max(0, oct - 1) * .5), PW = Math.ceil(rw * ppu), PH = Math.ceil(rh * ppu);
+    if (PW * PH > 1200 * 1200) continue;
+    const tb = t.cloneNode(); tb.removeAttribute('result'); if (fine) tb.setAttribute('stitchTiles', 'stitch');
+    const src = `<svg xmlns="${NS}" width="${PW}" height="${PH}" viewBox="${rx} ${ry} ${rw} ${rh}"><filter id="n" filterUnits="userSpaceOnUse" x="${rx}" y="${ry}" width="${rw}" height="${rh}" color-interpolation-filters="sRGB">${tb.outerHTML}</filter><rect x="${rx}" y="${ry}" width="${rw}" height="${rh}" filter="url(#n)"/></svg>`;
+    const img = new Image();
+    img.onload = () => { try {
+      const c = document.createElement('canvas'); c.width = PW; c.height = PH; const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+      // store the noise's colour values fully opaque: the filter reads its colour channels, and an image with
+      // see-through pixels would be read premultiplied (darker) by some browsers
+      const px = g.getImageData(0, 0, PW, PH); for (let i = 3; i < px.data.length; i += 4) px.data[i] = 255; g.putImageData(px, 0, 0);
+      const url = c.toDataURL('image/png'), res = t.getAttribute('result');
+      const im = document.createElementNS(NS, 'feImage');
+      // a tile must sit inside the filter's region (the drawing's box) or it gets clipped: anchor it at the drawing's
+      // centre, snapped to whole tiles so the grain keeps the same phase as the live noise would
+      let ox = rx, oy = ry;
+      if (fine){ const bb = svg.getElementById ? document.getElementById('art').getBBox() : { x: 0, y: 0, width: 0, height: 0 };
+        ox = Math.floor((bb.x + bb.width/2) / rw) * rw; oy = Math.floor((bb.y + bb.height/2) / rh) * rh; }
+      for (const [k, v] of [['x', ox], ['y', oy], ['width', rw], ['height', rh], ['preserveAspectRatio', 'none']]) im.setAttribute(k, v);
+      im.setAttribute('href', url); im.setAttributeNS('http://www.w3.org/1999/xlink', 'xlink:href', url);
+      if (!t.isConnected) return;
+      if (fine){ im.setAttribute('result', res + '_tile'); const tl = document.createElementNS(NS, 'feTile'); tl.setAttribute('in', res + '_tile'); tl.setAttribute('result', res); t.replaceWith(im, tl); }
+      else { im.setAttribute('result', res); t.replaceWith(im); }
+    } catch (e) {} };
+    img.src = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(src);
+  }
+}
+function mountFigure(cfg){
+  document.title = cfg.title;
+  const style = document.createElement('style'); style.textContent = CORE_CSS; document.head.appendChild(style);
+  document.body.innerHTML = `
+    <header><h1>Fig. ${cfg.fig} — ${cfg.title}</h1></header>
+    <div class="stage">
+      ${cfg.buttons && cfg.buttons.length ? `<div class="actions" id="btns"></div>` : ''}
+      ${cfg.stats ? '<div class="stats" id="stats"></div>' : ''}
+      <div class="toast" id="toast" role="status"></div>
+      <svg id="fig" role="img" aria-label="${cfg.title}"><defs id="fdefs"></defs><g id="art" filter="url(#hand)"></g></svg>
+    </div>
+    <div id="readout"></div>
+    ${cfg.idea ? `<p class="idea"><strong>The big idea</strong>${cfg.idea}</p>` : ''}
+    <div class="controls">
+      <div class="ctl"><label for="wb">Hand-drawn wobble</label><input id="wb" type="range" min="0" max="7" step="0.1" value="2.4"></div>
+      <div class="ctl"><label>Colour</label><div class="row" id="pals"></div></div>
+      <div class="ctl"><label>View</label><div class="row"><button id="vreset">Front view</button><button id="vspin" aria-pressed="false">Turntable</button></div></div>
+      <div class="ctl" id="lblctl" hidden><label>Labels</label><div class="row"><button id="lbl" aria-pressed="true">On</button></div></div>
+    </div>
+    ${cfg.credit === false ? '' : '<footer class="made-with"><a href="https://april-zhu.com/colorfigures" target="_blank" rel="noopener">Made with Colorfigures ↗</a></footer>'}`;
+  const st = cfg.state || {};            // kept as the same object, so a figure may hold on to it
+  if (!st.pal) st.pal = cfg.palette || 'mustard';
+  if (st.az == null) st.az = 105;
+  const q = new URLSearchParams(location.search);
+  // a figure turns all the way round only once it has been checked from every side (turn:'full'); otherwise it turns
+  // +-60 deg around the front, where it was drawn. ?free=1 unlocks it for testing.
+  CAM_LIM = cfg.turn === 'full' || q.get('free') === '1' ? null : 60;
+  if (PALS[q.get('pal')]) st.pal = q.get('pal');
+  if (cfg.params) cfg.params(st, q);
+
+  // frame on the object itself: centred, filling ~60% of the width / ~78% of the height of a 4:3 view.
+  // The cast shadow is allowed to spill outside the frame (svg overflow is visible).
+  const [W,D,H] = cfg.size, pts = [];
+  OX = OY = 0; RC = cfg.center || [W/2, D/2]; RCZ = H/2;
+  VIEW = 0; setCam(YAW0, PITCH0);
+  for (const x of [0,W]) for (const y of [0,D]) for (const z of [0,H]) pts.push(P(x,y,z));
+  const xs=pts.map(p=>p[0]), ys=pts.map(p=>p[1]);
+  const bw = Math.max(...xs)-Math.min(...xs), bh = Math.max(...ys)-Math.min(...ys);
+  // the object fills ~74% of the width / ~88% of the height, nudged right of centre so the buttons (top left) stay clear
+  // on a phone (FIG_A, from the gallery) the frame grows taller than 4:3, as far as the object needs, so tall machines fill it;
+  // the spare height goes mostly below; the object stays centred (its shadow may run off the edge, by the owner's call)
+  const PA = window.FIG_A ? FIG_A() : .75, A = PA === .75 ? .75 : Math.min(PA, Math.max(.75, bh/.88/(bw/.74)*1.08)), vbW = Math.max(bw/.74, bh/.88/A), vbH = vbW*A;
+  OX = (vbW-bw)/2 + (PA === .75 ? vbW*.06 : 0) - Math.min(...xs); OY = (PA === .75 ? vbH*.04 : (vbH - bh)*.3) - Math.min(...ys);   // sit a little high: shadows fall downward
+  const svg = document.getElementById('fig');
+  svg.setAttribute('viewBox', `0 0 ${f(vbW)} ${f(vbH)}`);
+  INK_K = vbW / INK_REF_VB;
+  document.getElementById('fdefs').innerHTML = filterFor(INK_K);
+  bakeNoise(svg);
+
+  const art = document.getElementById('art'), readout = document.getElementById('readout');
+  const ui = { st };
+  ui.render = () => { _clipN = 0; document.documentElement.style.setProperty('--accent', PALS[st.pal].l); art.innerHTML = inkScale(cfg.scene(st, PALS[st.pal])); if (!ui._flash) readout.textContent = cfg.readout ? cfg.readout(st) : ''; if (ui.drawStats) ui.drawStats(); };
+  // big numbers in the top-right corner (credit, change, score…); a value that changes gets a little bump
+  const statsEl = document.getElementById('stats'), prevStats = {};
+  ui.drawStats = () => { if (!statsEl) return;
+    const list = cfg.stats(st).filter(Boolean), html = list.map(x => `<div class="stat${x.small ? ' small' : ''}"><div class="k">${x.label}</div><div class="v" data-k="${x.label}">${x.value}</div></div>`).join('');
+    if (statsEl._html !== html){ statsEl._html = html; statsEl.innerHTML = html;
+      statsEl.querySelectorAll('.v').forEach(v => { if (prevStats[v.dataset.k] != null && prevStats[v.dataset.k] !== v.textContent) v.classList.add('bump'); prevStats[v.dataset.k] = v.textContent; }); } };
+  let flashT = 0;
+  const toast = document.getElementById('toast');
+  ui.flash = (text, ms=1600) => { ui._flash = true; readout.textContent = text; toast.textContent = text;
+    toast.style.top = ((document.getElementById('btns') ? document.getElementById('btns').offsetTop + document.getElementById('btns').offsetHeight : 0) + 8) + 'px'; toast.classList.add('show');
+    clearTimeout(flashT); flashT = setTimeout(() => { ui._flash = false; toast.classList.remove('show'); ui.render(); }, ms); };
+  // One frame driver for every running animation: each frame runs all the steps, then draws once (two animations at
+  // the same time no longer draw twice). It follows the screen's frames, with a timer fallback for when frames don't
+  // come (headless shots, a hidden tab). ui.invalidate() asks for one redraw on the next frame (used while dragging).
+  const steps = new Set(); let driving = false, lastT = 0, fbT = 0;
+  const frame = () => { if (!driving) return; driving = false; clearTimeout(fbT);
+    const now = performance.now(), dt = Math.max(0, Math.min(.05, (now - lastT) / 1000)); lastT = now;
+    for (const s of [...steps]) if (s(dt) === false) steps.delete(s);
+    ui.render(); if (steps.size) drive(); };
+  const drive = () => { if (driving) return; driving = true; requestAnimationFrame(frame); fbT = setTimeout(frame, 60); };
+  ui.animate = step => { if (!steps.size && !driving) lastT = performance.now(); steps.add(step); drive(); };
+  ui.invalidate = () => drive();
+
+  // clickable parts react on press, not on click: while something animates, the scene is redrawn every frame, so the
+  // element under the pointer is replaced between press and release and a 'click' would never fire
+  svg.addEventListener('pointerdown', e => { if (e.button) return; const a = e.target.closest('[data-act]'); if (!a || !cfg.acts || !cfg.acts[a.dataset.act]) return;
+    e.preventDefault(); cfg.acts[a.dataset.act](st, a, ui); ui.render(); });
+  // orbit: drag anywhere that is not a clickable part (the machine turns the way the finger moves); arrow keys nudge; double-click eases back to the front view
+  let drag = null, spin = false, camAnim = 0;
+  const camTo = (y, p, ms=700) => { const y0 = YAW, p0 = PITCH, dy = ((y - y0 + 540) % 360) - 180, id = ++camAnim; let t = 0;
+    ui.animate(dt => { if (id !== camAnim) return false; t += dt*1000; const k = Math.min(1, t / ms), e = ease(k); setCam(y0 + dy*e, p0 + (p - p0)*e); return k < 1; }); };
+  ui.camTo = camTo;
+  svg.addEventListener('pointerdown', e => { if (e.button || e.target.closest('[data-act]')) return;
+    camAnim++; drag = { x:e.clientX, y:e.clientY, yaw:YAW, pitch:PITCH }; svg.classList.add("drag"); try { svg.setPointerCapture(e.pointerId); } catch {} });
+  svg.addEventListener('pointermove', e => { if (!drag) return; const k = 300 / svg.getBoundingClientRect().width;
+    setCam(drag.yaw + (e.clientX - drag.x)*.55*k, drag.pitch + (e.clientY - drag.y)*.35*k); ui.invalidate(); });
+  const endDrag = () => { drag = null; svg.classList.remove('drag'); };
+  svg.addEventListener('pointerup', endDrag); svg.addEventListener('pointercancel', endDrag);
+  svg.addEventListener('dblclick', e => { if (!e.target.closest('[data-act]')) camTo(YAW0, PITCH0); });
+  addEventListener('keydown', e => { const k = { ArrowLeft:[-15,0], ArrowRight:[15,0], ArrowUp:[0,8], ArrowDown:[0,-8] }[e.key];
+    if (!k || window.GAME_KEYS || /input|textarea/i.test(e.target.tagName)) return; e.preventDefault(); camTo(YAW + k[0], PITCH + k[1], 260); });   // a game figure keeps the arrows for play
+  document.getElementById('vreset').onclick = () => { spin = false; vsp.setAttribute('aria-pressed', false); camTo(YAW0, PITCH0); };
+  const vsp = document.getElementById('vspin');
+  vsp.onclick = () => { spin = !spin; vsp.setAttribute('aria-pressed', spin); camAnim++;
+    let dir = 1;   // with a turning limit, the turntable swings back and forth inside it
+    if (spin) ui.animate(dt => { if (!spin) return false; if (!drag){ let y = YAW + dir*dt*18;
+      if (CAM_LIM != null && Math.abs(y - YAW0) >= CAM_LIM - .5){ dir = -dir; y = YAW + dir*dt*18; } setCam(y, PITCH); } return true; }); };
+  if (q.has('yaw') || q.has('pitch')) setCam(+(q.get('yaw') ?? YAW0), +(q.get('pitch') ?? PITCH0));
+  const btns = document.getElementById('btns');
+  const stepEls = [];
+  if (btns) cfg.buttons.forEach((b, i) => {
+    const wrap = document.createElement('div'); wrap.className = 'stepwrap';
+    const el = document.createElement('button'); el.className = 'act';
+    el.innerHTML = `${b.label}${b.choices ? '<span class="car">▾</span>' : ''}`;
+    wrap.appendChild(el); btns.appendChild(wrap); stepEls.push(el);
+    if (!b.choices){ el.onclick = () => { closeChips(); b.onClick(st, ui); ui.render(); }; return; }
+    const chips = document.createElement('div'); chips.className = 'chips'; wrap.appendChild(chips);
+    el.onclick = e => { e.stopPropagation(); const open = !wrap.classList.contains('open'); closeChips();
+      if (!open) return;
+      chips.innerHTML = '';
+      // every choice stays clickable, so nothing silently ignores a press:
+      //   current:true  = the one in use (shown selected); a press just says so
+      //   disabled:true = not possible right now (shown faded); a press says why (c.why, or a generic note)
+      for (const c of b.choices(st)){ const ch = document.createElement('button'); ch.className = 'chip' + (c.current ? ' current' : c.disabled ? ' off' : ''); ch.textContent = c.label;
+        if (c.current) ch.setAttribute('aria-pressed', 'true');
+        ch.onclick = ev => { ev.stopPropagation(); closeChips();
+          if (c.current) return ui.flash(`${c.label} — already set`);
+          if (c.disabled) return ui.flash(c.why || `${c.label} isn't possible right now`);
+          c.onClick(st, ui); ui.render(); }; chips.appendChild(ch); }
+      wrap.classList.add('open'); };
+  });
+  function closeChips(){ document.querySelectorAll('.stepwrap.open').forEach(w => w.classList.remove('open')); }
+  document.addEventListener('click', closeChips);
+
+  document.getElementById('wb').oninput = e => document.getElementById('wob').setAttribute('scale', (e.target.value * INK_K).toFixed(2));
+  const pals = document.getElementById('pals');
+  for (const [k,p] of Object.entries(PALS)){
+    const b = document.createElement('button'); b.className='sw'; b.title=k; b.style.background=p.l; b.setAttribute('aria-pressed', k===st.pal);
+    b.onclick = () => { st.pal=k; [...pals.children].forEach(c=>c.setAttribute('aria-pressed', c===b)); ui.render(); };
+    pals.appendChild(b);
+  }
+  // labels: the switch appears when the figure draws any tag(); ?labels=0 starts with them hidden
+  const lblctl = document.getElementById('lblctl'), lbl = document.getElementById('lbl');
+  const setLabels = on => { document.documentElement.classList.toggle('nolabels', !on); lbl.textContent = on ? 'On' : 'Off'; lbl.setAttribute('aria-pressed', on); };
+  lbl.onclick = () => setLabels(document.documentElement.classList.contains('nolabels'));
+  if (q.get('labels') === '0') setLabels(false);
+  // testing: ?press=Label@ms,Label@ms clicks the buttons whose text starts with Label at those times after load
+  // (any order, repeats allowed); Label>Choice picks a choice from a picker button (?press=Speed>3@300).
+  // Script errors and unknown labels are recorded on <html data-errors="…">
+  window.__st = st;
+  const noteErr = m => { document.documentElement.dataset.errors = (document.documentElement.dataset.errors || '') + ' ' + m + ';'; };
+  const starts = (el, t) => el.textContent.trim().toLowerCase().startsWith(t.trim().toLowerCase());
+  if (q.has('press')) q.get('press').split(',').forEach(item => { const [what, ms] = item.split('@'), [label, choice] = what.split('>');
+    setTimeout(() => { const b = [...document.querySelectorAll('.act')].find(b => starts(b, label));
+      if (!b) return noteErr(`no button "${label}"`);
+      b.click(); if (choice == null) return;
+      const c = [...b.parentElement.querySelectorAll('.chip')].find(c => starts(c, choice));
+      if (c && !c.disabled) c.click(); else noteErr(`no choice "${choice}" in "${label}"`); }, +ms || 0); });
+  setLight(st.az); ui.render();
+  if (art.querySelector('.tag')) lblctl.hidden = false;
+  return ui;
+}
+
+/* ---------- see-through + labels kit (shared; the figure supplies its own working parts) ----------
+   xrCallouts(items, B): pills in two columns either side of the object, sorted top to bottom so leaders never cross.
+     items: [{ at:[x,y,z], text, on }], B: the object's bounds [x0, x1, y0, y1, z0, z1].
+   xrGhost(body, mech, k, OUTp, x0, x1, m): far walls faintly, the working parts, then the case as a ghost over them.
+   xrMount(getUI, caption): the See-through / Labels switches (top right), the caption under the figure, label hiding. */
+function xrCallouts(items, B){
+  const pts = []; for (const x of [B[0], B[1]]) for (const y of [B[2], B[3]]) for (const z of [B[4], B[5]]) pts.push(P(x, y, z));
+  const xmin = Math.min(...pts.map(p => p[0])), xmax = Math.max(...pts.map(p => p[0])), cx = (xmin + xmax)/2;
+  // on a phone (LBL_U = drawing units per screen px) each label is a numbered badge and the names go in a legend under the figure
+  const k = INK_K, u = window.LBL_U ? LBL_U() : 0, fs = u ? 10*u : 8.6*k, hgt = u ? 17*u : fs*1.8, gap = hgt + (u ? 3*u : 3*k);
+  const L = [], R = [];
+  const svgEl = document.getElementById('fig'), vb = svgEl.viewBox.baseVal, btn = document.getElementById('btns');
+  const wMax = u ? hgt*1.3 + 12*k : Math.max(...items.map(it => it.text.length))*fs*.62 + fs*1.5 + 12*k;
+  const roomL = xmin - vb.x >= wMax, roomR = vb.x + vb.width - xmax >= wMax;
+  for (const it of items){ const [X, Y] = P(...it.at); ((X < cx && roomL) || !roomR ? L : R).push({ ...it, X, Y }); }
+  let s = '';
+  let top = { [-1]: fs, [1]: fs + 30*k };
+  if (btn && svgEl.getScreenCTM()){ const r = btn.getBoundingClientRect(), q = new DOMPoint(r.right, r.bottom + 50).matrixTransform(svgEl.getScreenCTM().inverse());
+    if (q.y > 0) top[-1] = q.y + hgt; }
+  for (const [col, side] of [[L, -1], [R, 1]]){
+    col.sort((a, b) => a.Y - b.Y);
+    let y = -1e9; for (const c of col){ c.py = Math.max(c.Y, y + gap, top[side]); y = c.py; }
+    const shift = col.length ? Math.max(0, col.reduce((a, c) => a + c.py - c.Y, 0) / col.length) : 0;
+    const room = col.length ? col[0].py - top[side] : 0; for (const c of col) c.py -= Math.min(shift, room);
+    for (const c of col){
+      c.n = ((window.__ln || (window.__ln = {}))[c.text] || (__ln[c.text] = Object.keys(__ln).length + 1)); const w = u ? hgt*(c.n > 9 ? 1.3 : 1) : c.text.length*fs*.62 + fs*1.5;
+      let px = side < 0 ? xmin - 10*k - w/2 : xmax + 10*k + w/2; px = Math.max(vb.x + w/2 + 2*k, Math.min(vb.x + vb.width - w/2 - 2*k, px));
+      const ex = px - side*w/2;
+      s += `<g class="tag${c.on ? ' on' : ''}" data-n="${c.n}" data-t="${c.text}"><path d="M${f(c.X)} ${f(c.Y)}L${f(ex + side*-4*k)} ${f(c.py)}L${f(ex)} ${f(c.py)}" fill="none" stroke="${INK}" stroke-width="1"/>`
+        + `<circle cx="${f(c.X)}" cy="${f(c.Y)}" r="${f(1.4*k)}" fill="${INK}"/>`
+        + `<rect x="${f(px - w/2)}" y="${f(c.py - hgt/2)}" width="${f(w)}" height="${f(hgt)}" rx="${f(hgt/2)}" fill="${c.on ? 'var(--accent,#f4b829)' : '#fff4d6'}" stroke="${INK}" stroke-width="1.2"/>`
+        + `<text x="${f(px)}" y="${f(c.py + fs*.36)}" font-size="${f(fs)}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="800" letter-spacing=".04em" fill="${INK}">${u ? c.n : c.text}</text></g>`;
+    }
+  }
+  return s;
+}
+function xrGhost(body, mech, k, OUTp, x0, x1, m){
+  const fF = facing([1,0,0]), fB = facing([-1,0,0]);
+  const far = `<g opacity="${f(.5*k)}">` + loft(on(PX(x0), OUTp), on(PX(x1), OUTp), n => mix(toneI(n.map(v => -v), m), '#f2efe7', .55), true)
+    + (fF ? fill(pd(on(PX(x0), OUTp)), mix(m.d, '#f2efe7', .5)) : '') + (fB ? fill(pd(on(PX(x1), OUTp)), mix(m.d, '#f2efe7', .5)) : '') + `</g>`;
+  return far + mech + `<g opacity="${f(1 - .8*k)}">${body}</g>` + `<g opacity="${f(.6*k)}">` + hullInk([...on(PX(x0), OUTp), ...on(PX(x1), OUTp)], 2.8) + `</g>`;
+}
+function xrMount(getUI, caption, opt = {}){   // opt.labelsOnly: only the Labels switch (the insides are on show already)
+  const ui = getUI(), q = new URLSearchParams(location.search), html = document.documentElement;
+  if (q.get('labels') !== '1') html.classList.add('nolabels');
+  if (ui.st.xr == null){ ui.st.xr = 0; ui.st.xrT = 0; }
+  if (q.get('xr') === '1') ui.st.xr = ui.st.xrT = 1;
+  const old = document.getElementById('lblctl'); if (old) old.style.display = 'none';
+  const vset = document.createElement('div'); vset.className = 'vset';
+  vset.innerHTML = '<div class="vrow">' + (opt.labelsOnly ? '' : '<button class="act" id="xrb" aria-pressed="false">See-through</button>') + '<button class="act" id="lblb" aria-pressed="false">Labels</button></div>';
+  document.querySelector('.stage').appendChild(vset);
+  // pages with a stats panel in the top right: the switches go just under it
+  const place = () => { const sp = document.getElementById('stats'); vset.style.top = sp ? (sp.offsetTop + sp.offsetHeight + 10) + 'px' : ''; };
+  place(); new ResizeObserver(place).observe(document.getElementById('stats') || vset);
+  const xrb = document.getElementById('xrb'), lblb = document.getElementById('lblb');
+  const sync = () => { if (xrb) xrb.setAttribute('aria-pressed', !!getUI().st.xrT); lblb.setAttribute('aria-pressed', !html.classList.contains('nolabels')); };
+  if (xrb) xrb.onclick = () => { const u = getUI(), st = u.st; st.xr = st.xr || 0; st.xrT = st.xrT ? 0 : 1; sync();
+    u.animate(dt => { const g = Math.sign(st.xrT - st.xr); st.xr = Math.min(1, Math.max(0, st.xr + g*dt/.7)); return st.xr !== st.xrT; }); };
+  lblb.onclick = () => { html.classList.toggle('nolabels'); sync(); };
+  sync();
+  const cap = document.createElement('p'); cap.className = 'mcap'; document.querySelector('.stage').after(cap);
+  const css = document.createElement('style');
+  css.textContent = '.vset{position:absolute;top:4px;right:0;z-index:2}.vrow{display:flex;gap:6px}.vset .act[aria-pressed=true]{background:var(--ink);color:var(--paper)}'
+    + 'html.nolabels #fig .tag{display:none}.mcap{width:100%;max-width:760px;min-height:3em;margin:0 0 14px;font-size:12.5px;line-height:1.5;text-align:center;transition:opacity .3s}'
+    + '@media (max-width:560px){.vset{position:static;margin:4px 0}}';
+  document.head.appendChild(css);
+  const r0 = ui.render; ui.render = () => { r0(); const st = getUI().st; cap.style.opacity = st.xr > .5 ? 1 : 0; cap.textContent = caption(st); };
+  ui.render();
+}
+// same, for a body lofted between two horizontal rings A (bottom) and B (top)
+function xrGhostRings(body, mech, k, A, B, m){
+  const far = `<g opacity="${f(.5*k)}">` + loft(A, B, n => mix(toneI(n.map(v => -v), m), '#f2efe7', .55), true) + fill(pd(A), mix(m.d, '#f2efe7', .5)) + `</g>`;
+  return far + mech + `<g opacity="${f(1 - .8*k)}">${body}</g>` + `<g opacity="${f(.6*k)}">` + hullInk([...A, ...B], 2.8) + `</g>`;
+}
+// generic see-through for any figure: the whole drawing fades back and the inside parts show over it.
+//   opts: { mech(st, k) -> svg, inside(st) -> label items, surface(st) -> label items (optional), B: bounds, getSt() }
+// washer-style ghost for an object without a single box case: its inside parts first, then the object pale over them
+const xrUnder = (svg, mech, k) => `<g opacity="${f(k)}">${mech}</g><g opacity="${f(1 - .62*k)}">${svg}</g>`;
+function xrWrap(sceneFn, opts){
+  return function(){
+    let s = sceneFn.apply(this, arguments);
+    const st = opts.getSt(), k = ease(st.xr || 0);
+    if (k > 0 && opts.under) s = xrUnder(s, opts.mech(st, k), k);   // the whole drawing is the object
+    else if (k > 0 && !opts.inline) s = `<g opacity="${f(1 - .5*k)}">${s}</g><g opacity="${f(k)}">${opts.mech(st, k)}</g>`;   // inline: the figure ghosts its own case
+    const items = k > .6 ? opts.inside(st) : opts.surface ? opts.surface(st) : [];
+    return s + (items.length ? xrCallouts(items, opts.B) : '');
+  };
+}
+
+/* ---------- game keypad: mountKeypad({ rows, hub:[col,row], action:'DROP', keys:[{ key:'ArrowLeft', glyph:'\u25c0', name, at:[col,row] }] })
+   An inked pad under the buttons that sends the same keyboard events as the arrows and space (set window.GAME_KEYS = true
+   so the arrows play instead of turning the camera). ---------- */
+function mountKeypad(spec){
+  const host = document.getElementById('btns'); if (!host) return;
+  const css = document.createElement('style');
+  css.textContent = `.kpad{display:flex;align-items:center;gap:16px;margin-top:6px;padding:10px 12px;border:1.5px solid var(--ink);border-radius:14px;
+      background:var(--paper);box-shadow:0 3px 0 var(--ink);touch-action:none;user-select:none;-webkit-user-select:none}
+    .kpad .dp{display:grid;grid-template-columns:repeat(3,34px);grid-template-rows:repeat(var(--rows),34px);gap:3px}
+    .kpad .k{all:unset;box-sizing:border-box;display:flex;align-items:center;justify-content:center;width:34px;height:34px;cursor:pointer;
+      background:#fbf7ea;border:1.5px solid var(--ink);border-radius:7px;box-shadow:0 3px 0 var(--ink);color:var(--ink);font:700 13px ui-monospace,Menlo,monospace;
+      transition:transform .05s,box-shadow .05s,background .05s}
+    .kpad .hub{width:34px;height:34px;display:flex;align-items:center;justify-content:center}
+    .kpad .hub i{width:12px;height:12px;border-radius:50%;border:1.5px solid var(--ink);background:#e6e0d1}
+    .kpad .go{all:unset;box-sizing:border-box;width:62px;height:62px;border-radius:50%;cursor:pointer;display:flex;flex-direction:column;align-items:center;justify-content:center;
+      background:#e2483d;border:1.5px solid var(--ink);box-shadow:0 4px 0 var(--ink),inset 0 -5px 0 rgba(0,0,0,.18);color:#fff;font:800 12px ui-monospace,Menlo,monospace;letter-spacing:.06em;
+      transition:transform .05s,box-shadow .05s}
+    .kpad .go small{font:700 8px ui-monospace,Menlo,monospace;opacity:.85;letter-spacing:.08em;margin-top:2px}
+    .kpad .down{transform:translateY(2px);box-shadow:0 1px 0 var(--ink)}
+    .kpad .k.down{background:var(--accent,#f4b829)}
+    .kpad .go.down{transform:translateY(3px);box-shadow:0 1px 0 var(--ink),inset 0 -3px 0 rgba(0,0,0,.18)}
+    @media (max-width:560px){.kpad{gap:22px;padding:10px 16px}.kpad .dp{grid-template-columns:repeat(3,44px);grid-template-rows:repeat(var(--rows),44px)}
+      .kpad .k,.kpad .hub{width:44px;height:44px;font-size:15px}.kpad .go{width:74px;height:74px}}`;
+  document.head.appendChild(css);
+  const pad = document.createElement('div'); pad.className = 'kpad'; pad.setAttribute('role', 'group'); pad.setAttribute('aria-label', 'Keypad');
+  const dp = document.createElement('div'); dp.className = 'dp'; dp.style.setProperty('--rows', spec.rows);
+  const els = {};
+  for (const k of spec.keys){
+    const b = document.createElement('button'); b.className = 'k'; b.textContent = k.glyph; b.setAttribute('aria-label', k.name);
+    b.style.gridColumn = k.at[0] + 1; b.style.gridRow = k.at[1] + 1; dp.appendChild(b); els[k.key] = b; }
+  if (spec.hub){ const h = document.createElement('div'); h.className = 'hub'; h.innerHTML = '<i></i>'; h.style.gridColumn = spec.hub[0] + 1; h.style.gridRow = spec.hub[1] + 1; dp.appendChild(h); }
+  const go = document.createElement('button'); go.className = 'go'; go.innerHTML = `${spec.action}<small>SPACE</small>`; go.setAttribute('aria-label', spec.action);
+  els[' '] = go;
+  pad.append(dp, go); host.appendChild(pad);
+  const send = (type, key) => dispatchEvent(new KeyboardEvent(type, { key, bubbles: true }));
+  for (const [key, el] of Object.entries(els)){
+    let held = null;
+    el.addEventListener('pointerdown', e => { e.preventDefault(); e.stopPropagation(); if (held != null) return; held = e.pointerId;
+      try { el.setPointerCapture(e.pointerId); } catch (_) {} send('keydown', key); });
+    const release = e => { if (held == null || (e && e.pointerId !== held)) return; held = null; send('keyup', key); };
+    el.addEventListener('pointerup', release); el.addEventListener('pointercancel', release); el.addEventListener('lostpointercapture', release);
+    el.addEventListener('click', e => e.preventDefault());
+    el.addEventListener('keydown', e => { if (e.key === 'Enter'){ e.preventDefault(); send('keydown', key); setTimeout(() => send('keyup', key), 120); } });
+  }
+  // space belongs to the game: a button that still has the focus from a click must not be pressed by it too
+  addEventListener('keydown', e => { if (e.key === ' ' && e.target && e.target.closest && e.target.closest('button')) e.preventDefault(); }, true);
+  addEventListener('keyup', e => { if (e.key === ' ' && e.target && e.target.closest && e.target.closest('button')) e.preventDefault(); }, true);
+  // light the keys for real key presses too (and for the pad's own, which arrive the same way)
+  addEventListener('keydown', e => { const el = els[e.key]; if (el) el.classList.add('down'); });
+  addEventListener('keyup', e => { const el = els[e.key]; if (el) el.classList.remove('down'); });
+  addEventListener('blur', () => Object.values(els).forEach(el => el.classList.remove('down')));
+}
+
+</script>
+<script>
+/* Stapler: a full-strip desk stapler (26/6 staples), about 19 cm long. x = width 34 (crosswise), z = up.
+   Along its length the drawing works in u: u = 0 at the nose, u = 136 at the tail; world y = 136 - u, so the nose comes
+   toward the viewer at the default view. Widths and staple sizes are drawn a little big so a single staple reads.
+
+   How it really works
+   1. Paper goes in the throat, on the anvil. Press the cap: cap and magazine turn together on one hinge pin, squashing
+      the base leaf spring, until the nose rests on the paper.
+   2. Press on: the magazine has stopped, the cap keeps turning and squashes the cap leaf spring. The hammer blade, pinned
+      to the cap, slides down the slot in the nose. It lands on the front staple only (it is one staple thick) and shears
+      it off the glued strip.
+   3. The legs go through the paper, tips first, and meet the anvil: two curved grooves steer them inward and fold them
+      flat under the sheets. The crown ends up tight on the top sheet.
+   4. Let go: the cap spring lifts the blade clear of the strip. The strip, astride its rail, is pulled along by the
+      follower: an extension spring hooked between the nose post and the follower. It moves on by exactly one staple,
+      into the slot, and stops against the nose. Then the base spring lifts the magazine.
+   Real failure ("Break the spring"): the follower spring snaps. The staple already in the slot still fires, but nothing
+   brings up the next. The blade comes down on an empty slot: click, no staple, with a full magazine.
+
+   Parts (each fixed to the part named)
+   BASE       rubber pad (base plate) . base plate . anvil plate (riveted to base) with inward and outward groove sets .
+              anvil rivet . hinge bracket: two ears and a rear web (base) . hinge pin (ears) and its two rivet heads .
+              base leaf spring (riveted to base, tip under the magazine) . its rivet
+   MAGAZINE   channel: two walls and a top web (turns on the pin) . nose: front plate, two cheeks, slotted top .
+              staple rail (held at the rail block) . rail block (channel) . nose post (channel top, spring's front hook) .
+              staple strip, every staple a crown and two legs . front staple . follower (rides the rail) .
+              follower spring (nose post to follower)
+   HEAD       cap: top, two skirts (turns on the pin) . grip pad and its ridges . hammer blade (slides in the nose slot) .
+              blade holder with a slot, under the cap (the blade's pin rides in it) . blade pin .
+              cap leaf spring (riveted to the channel top, tip under the cap) . its rivet . release catch at the tail
+   Take apart: every group moves along its own offset, and the head lowers so the pieces stack neatly. */
+const LEN = 136, BX = 34, XC = 17;
+const HU = 122, HZ = 20;                                    // the hinge pin
+const A_OPEN = 10;                                          // magazine at rest, degrees up from the closed position
+const TOP0 = 25.4, TRAVEL = 14.7;                           // blade tip at rest, and how far it travels
+const C_OPEN = Math.atan(TRAVEL/(HU - 8.5))*180/Math.PI;    // cap above magazine at rest: exactly the blade's travel at the nose
+const PITCH_S = 1.8, SLOT_U = 8.5, COUNT0 = 48;             // staple spacing, where the front staple sits, a full strip
+const LEG = 8, Z_CROWN = 24.4, Z_ANVIL = 7, Z_PAPER = 10;   // staple leg, crown centre at rest, anvil top, top of the paper
+const SEG = [900, 800, 700, 900];                           // ms per stage: nose down, blade to paper, through it, fold
+const qs = new URLSearchParams(location.search);
+const SLOW = +qs.get('slow') > 0 ? +qs.get('slow') : 1;     // ?slow=N: paces "Press a little" for the video
+const TIGHT = +qs.get('tight') > 0 ? +qs.get('tight') : 1;  // ?tight=N: draws it N times bigger (a long, thin object leaves the video's square half empty)
+const FEED_MS = 170*(SLOW > 1 ? 3 : 1);                     // the strip moving on by one staple
+
+const NICK = { l:'#7c8389', m:'#5c6369', d:'#3b4146' }, RUBBER = { l:'#4a4744', m:'#393633', d:'#272523' };
+const GOLD = { l:'#f2c230', m:'#d9a520', d:'#94700f' }, BLADE = { l:'#f8f9f9', m:'#d6dcdf', d:'#98a2a6' };
+const PAPERC = { l:'#fffdf4', m:'#efeadb', d:'#d3cdb9' };
+
+/* ---------- frames: everything on the head is a (u, z) shape turned about the hinge, then swept along x ---------- */
+let AM = 0, AC = 0;                                         // magazine and cap-on-magazine angles (radians) for this frame
+const rad = d => d*Math.PI/180;
+const rotUZ = (u, z, a) => { const du = u - HU, dz = z - HZ, c = Math.cos(a), s = Math.sin(a); return [HU + du*c + dz*s, HZ + dz*c - du*s]; };
+const W3 = (x, u, z) => [x, LEN - u, z];                      // fixed to the base
+const M3 = (x, u, z) => { const q = rotUZ(u, z, AM); return [x, LEN - q[0], q[1]]; };           // turns with the magazine
+const K3 = (x, u, z) => { const q = rotUZ(u, z, AM + AC); return [x, LEN - q[0], q[1]]; };      // turns with the cap
+const bb = pts => [[0,1,2].map(i => Math.min(...pts.map(p => p[i]))), [0,1,2].map(i => Math.max(...pts.map(p => p[i])))];
+const mw = w => `style="stroke-width:${w}"`;                // a stroke in model units
+
+// a solid: a convex (u, z) shape in frame F swept from x0 to x1
+function pr(F, poly, x0, x1, mat, w = .8, shade = toneI){
+  const A = poly.map(([u, z]) => F(x0, u, z)), B = poly.map(([u, z]) => F(x1, u, z));
+  let s = loft(A, B, n => shade(n, mat));
+  if (vis([1,0,0])) s += shape(B, shade([1,0,0], mat), .6); else if (vis([-1,0,0])) s += shape(A, shade([-1,0,0], mat), .6);
+  return { box: bb([...A, ...B]), svg: s + hullInk([...A, ...B], w) };
+}
+// a thin curved sheet along an open (u, z) path (leaf springs, the cap's skin); inner = draw the side facing away
+function sheet(F, path, x0, x1, colour, inner = false){
+  const A = path.map(([u, z]) => F(x0, u, z)), B = path.map(([u, z]) => F(x1, u, z));
+  const cen = avg([...A, ...B]); let s = '';
+  for (let i = 0; i < path.length - 1; i++){
+    let n = norm(cross(sub(A[i+1], A[i]), sub(B[i], A[i])));
+    if (!isFinite(n[0])) continue;
+    if (dot(n, sub(avg([A[i], A[i+1], B[i+1], B[i]]), cen)) < 0) n = n.map(v => -v);
+    if (inner) n = n.map(v => -v);
+    if (vis(n)) s += face(pd([A[i], A[i+1], B[i+1], B[i]]), colour(n));
+  }
+  return s;
+}
+function leafSpring(F, path, x0, x1, w = .9){
+  const A = path.map(([u, z]) => F(x0, u, z)), B = path.map(([u, z]) => F(x1, u, z));
+  let s = '';
+  for (let i = 0; i < path.length - 1; i++){
+    let n = norm(cross(sub(A[i+1], A[i]), sub(B[i], A[i])));
+    if (!vis(n)) n = n.map(v => -v);
+    s += face(pd([A[i], A[i+1], B[i+1], B[i]]), toneI(n, METAL));
+  }
+  return { box: bb([...A, ...B]), svg: s + ink(pd(A, false), w) + ink(pd(B, false), w) + ink(pd([A[0], B[0]], false), w) + ink(pd([A[A.length-1], B[B.length-1]], false), w) };
+}
+const bez = (a, c, b, n = 10) => Array.from({length:n+1}, (_, i) => { const t = i/n; return [0, 1].map(j => (1-t)*(1-t)*a[j] + 2*(1-t)*t*c[j] + t*t*b[j]); });
+
+/* ---------- the cap's outline, in its own frame (the frame it has when fully pressed) ---------- */
+const CAP_X0 = 5.5, CAP_X1 = 28.5;
+const CAP_SKIN = [[132.5,25],[134,29],[133,33],[128,36.5],[118,39.5],[100,42.4],[84,43.8],[66,44.5],[48,44.4],[30,43.6],[18,42.4],[10,41],[5,39],[3,36.5],[3.2,34],[13.5,33.6],[15.5,31],[16,22.4]];
+const CAP_POLY = [...CAP_SKIN, [132.5,22.8]];
+const capZ = u => { for (let i = 5; i < 13; i++){ const a = CAP_SKIN[i], b = CAP_SKIN[i+1]; if (u <= a[0] && u >= b[0]) return a[1] + (b[1] - a[1])*(a[0] - u)/(a[0] - b[0]); } return 40; };
+const TAIL_POLY = [[132,27],[136.5,28],[136.5,32.5],[132,33.5]];
+
+// text on a side, along the part's own direction (u increasing reads left to right on the +x side)
+function sideText(F, x, u, z, str, size, col = INK, weight = 800){
+  const xp = x > XC, o = F(x + (xp ? .06 : -.06), u, z), a = F(x, u, z);
+  if (xp ? !vis([1,0,0]) : !vis([-1,0,0])) return '';
+  const U = Dv(...sub(F(x, u + (xp ? 1 : -1), z), a)), V = Dv(...sub(F(x, u, z - 1), a));
+  return `<text transform="${txM(P(...o), U, V)}" font-size="${size}" fill="${col}" text-anchor="middle" font-family="ui-monospace,Menlo,monospace" font-weight="${weight}" letter-spacing=".08em">${str}</text>`;
+}
+
+/* ---------- take apart ---------- */
+// where each group goes: [dx, du, dz]
+const EX = { pad:[38,0,0], base:[38,0,5], anvil:[38,0,9], leaf:[38,0,9], pin:[60,0,-14], rail:[8,0,-9], strip:[-5,0,2], follow:[-20,0,-3],
+  chan:[-32,0,8], blade:[-26,-16,-10], capleaf:[-32,0,10], cap:[-52,0,21], paper:[0,-40,0] };
+let APE = 0;
+const exOff = g => { if (!(APE > 0) || !EX[g]) return null; const e = EX[g]; return [e[0]*APE, -e[1]*APE, e[2]*APE]; };
+function placed(g, p, op = 1){
+  const v = exOff(g); let svg = p.svg, box = p.box;
+  if (v){ const d = Dv(...v); svg = `<g transform="translate(${f(d[0])} ${f(d[1])})">${svg}</g>`; box = [p.box[0].map((c, i) => c + v[i]), p.box[1].map((c, i) => c + v[i])]; }
+  if (op < 1) svg = `<g opacity="${f(op)}">${svg}</g>`;
+  return { box, svg, g };
+}
+const at = (g, p) => { const v = exOff(g); return v ? p.map((c, i) => c + v[i]) : p; };
+
+/* ---------- staples ---------- */
+function rows(F, us, x, z0, z1){ return us.map(u => pd([F(x, u, z0), F(x, u, z1)], false)).join(''); }
+const wire = (d, col = '#c7ced1', w = .72) => `<path d="${d}" fill="none" stroke="${INK}" ${mw(w + .5)} stroke-linecap="round" stroke-linejoin="round"/><path d="${d}" fill="none" stroke="${col}" ${mw(w)} stroke-linecap="round" stroke-linejoin="round"/>`;
+const X_L = 10.3, X_R = 23.7;
+// one staple in the air or being driven: zc = crown height. Once a tip reaches the anvil the leg bends inward along the groove
+function stapleD(F, u, zc){
+  const legD = (xe, dir) => { const tipZ = zc - LEG;
+    if (tipZ >= Z_ANVIL) return pd([F(xe, u, zc), F(xe, u, tipZ)], false);
+    const r = LEG - (zc - Z_ANVIL), th = rad(90*Math.min(1, (r + .6)/3));
+    const pts = [F(xe, u, zc), F(xe, u, Z_ANVIL + .15)];
+    for (let i = 1; i <= 4; i++){ const q = r*i/4, a = th*i/4; pts.push(F(xe + dir*q*Math.sin(a), u, Z_ANVIL + .15 - q*Math.cos(a)*.55)); }
+    return pd(pts, false); };
+  return legD(X_L, 1) + pd([F(X_L, u, zc), F(X_R, u, zc)], false) + legD(X_R, -1);
+}
+
+const glow = (p, r, op) => { const [X, Y] = P(...p); return `<circle cx="${f(X)}" cy="${f(Y)}" r="${f(r)}" fill="url(#stGlow)" opacity="${op.toFixed(3)}"/>`; };
+
+/* ---------- position of the press ---------- */
+// pos: 0 rest, 1 nose on the paper, 2 tips on the paper, 3 tips on the anvil, 4 legs folded
+const tOf = pos => pos <= 1 ? 0 : pos <= 2 ? (pos - 1)*.48 : pos <= 3 ? .48 + (pos - 2)*.2 : .68 + (pos - 3)*.32;
+const bladeTip = t => TOP0 - TRAVEL*t;
+const crownAt = t => Math.min(Z_CROWN, bladeTip(t) - .35);
+
+/* ---------- scene ---------- */
+let ui, MECH_LABELS = '';
+function scene(st, m){
+  APE = st.ap > 0 ? ease(Math.min(1, st.ap)) : 0;
+  const t = tOf(st.pos), k = ease(st.xr || 0), apE = APE;
+  AM = rad(A_OPEN*(1 - ease(Math.min(1, st.pos))))*(1 - .8*apE);
+  AC = rad(C_OPEN*(1 - t))*(1 - .8*apE);
+  const FP = vis([1,0,0]);                                    // viewer on the +x side
+  const NOSEV = vis([0,1,0]);                                 // viewer sees the nose end
+  const shellOp = 1 - .8*k*(1 - apE);
+  const tipZ = bladeTip(t), fu = SLOT_U + st.gap + Math.max(0, st.count - 1)*PITCH_S + 1.1;
+
+  /* ---- base ---- */
+  const baseUV = rrUV(0, 0, BX, LEN, 9, 5), padUV = rrUV(1.2, 1.2, BX - 1.2, LEN - 1.2, 8, 5);
+  const pad = placed('pad', { box:[[1,1,0],[BX-1,LEN-1,2.6]], svg: loft(on(PZ(0), padUV), on(PZ(2.6), padUV), n => toneI(n, RUBBER)) + hullInk([...on(PZ(0), padUV), ...on(PZ(2.6), padUV)], 1.5) });
+  const A0 = on(PZ(2.6), baseUV), A1 = on(PZ(6), baseUV);
+  let bs = loft(A0, A1, n => tone(n, m)) + fill(pd(A1), tone([0,0,1], m));
+  bs += ink(pd(on(PZ(6.02), rrUV(2.4, 2.4, BX - 2.4, LEN - 2.4, 7, 5))), .7) + ink(pd(A1), 1.3) + hullInk([...A0, ...A1], 2.4);
+  for (const u of [100]) bs += fill(pd(on(PZ(6.03), ellUV(XC, LEN - u, 1.6, 1.6, 10))), METAL.d);
+  const base = placed('base', { box:[[0,0,2.6],[BX,LEN,6]], svg: bs });
+  // anvil plate: inward grooves under the slot, the outward set behind them (the plate turns on its rivet to swap), a rivet
+  const av = u => LEN - u;
+  const groove = (x0, x1, u0, u1) => shape(on(PZ(Z_ANVIL + .03), rrUV(x0, av(u1), x1, av(u0), .9, 3)), '#6f787c', .55)
+    + fill(pd(on(PZ(Z_ANVIL + .05), rrUV(x0 + .5, av(u1) + .5, x1 - .5, av(u0) + .9, .6, 3))), mix('#8d979b', '#ffb02e', st.anvilHit));
+  const anvUV = rrUV(5, av(18), 29, av(2.5), 2.5, 4), anv0 = on(PZ(6), anvUV), anv1 = on(PZ(Z_ANVIL), anvUV);
+  const ast = st.anvilHit;                                    // lights up as the legs fold
+  let as = loft(anv0, anv1, n => toneI(n, METAL)) + shape(anv1, mix(METAL.l, '#ffd86a', .55*ast), 1);
+  as += groove(9.6, 15.6, 7, 10) + groove(18.4, 24.4, 7, 10);
+  as += groove(5.8, 9.4, 13, 15.6) + groove(24.6, 28.2, 13, 15.6);
+  as += cyl(XC, av(14.3), Z_ANVIL, Z_ANVIL + .35, 1.8, METAL, toneI, .6, 12);
+  const anvil = placed('anvil', { box:[[5,av(18),6],[29,av(2.5),Z_ANVIL + .4]], svg: as });
+  // base leaf spring: riveted to the base, its tip presses up under the magazine
+  const tipW = rotUZ(36, 12, AM);
+  const leafPath = bez([100, 6.2], [74, 6.6 + (tipW[1] - 12)*.2], [tipW[0], tipW[1] - .1]);
+  const leafS = leafSpring(W3, leafPath, 12.5, 21.5);
+  leafS.svg += cyl(XC, LEN - 100, 6.3, 7.2, 1.5, METAL, toneI, .6, 10);
+  const leaf = placed('leaf', leafS);
+  // hinge bracket: two ears and a web, the pin with a rivet head outside each ear
+  const earP = rrUV(112, 6, 134, 28, 5, 4);
+  const earA = placed('base', pr(W3, earP, 3, 5, METAL, 1.4)), earB = placed('base', pr(W3, earP, 29, 31, METAL, 1.4));
+  const web = placed('base', pr(W3, rectUV(132, 6, 134, 15), 5, 29, METAL, 1));
+  const rivetA = placed('pin', { box:[[1.8,LEN-HU-2,HZ-2],[3,LEN-HU+2,HZ+2]], svg: cylX(1.8, 3, LEN - HU, HZ, 2.2, NICK, toneI, .9, 14) });
+  const rivetB = placed('pin', { box:[[31,LEN-HU-2,HZ-2],[32.2,LEN-HU+2,HZ+2]], svg: cylX(31, 32.2, LEN - HU, HZ, 2.2, NICK, toneI, .9, 14) });
+  const pinRod = placed('pin', { box:[[3,LEN-HU-1,HZ-1],[31,LEN-HU+1,HZ+1]], svg: rod([3, LEN - HU, HZ], [31, LEN - HU, HZ], 1.1, METAL, toneI, .7) });
+
+  /* ---- paper ---- */
+  let paper = null, paperTop = '';
+  const pE = ease(st.paper), pShift = -44*(1 - pE);
+  if (st.paper > .01){
+    const py0 = LEN + 26 - pShift, py1 = LEN - 30 - pShift;       // from the throat (u = 30) out past the nose
+    const uv = rectUV(-10, py1, 46, py0), a = on(PZ(Z_ANVIL + .02), uv), b = on(PZ(Z_PAPER), uv);
+    let ps = loft(a, b, n => toneI(n, PAPERC));
+    for (const z of [7.8, 8.6, 9.3]) ps += (FP ? ink(pd([[46, py1, z], [46, py0, z]], false), .35) : ink(pd([[-10, py1, z], [-10, py0, z]], false), .35)) + (NOSEV ? ink(pd([[-10, py0, z], [46, py0, z]], false), .35) : '');
+    ps += shape(b, PAPERC.l, 1.1);
+    let lines = ''; for (let i = 0; i < 7; i++){ const y = py0 - 8 - i*6.2; lines += pd([[-4, y, Z_PAPER + .03], [36 - (i%3)*7, y, Z_PAPER + .03]], false); }
+    ps += `<path d="${lines}" fill="none" stroke="#c9c4b4" ${mw(.8)}/>`;
+    paper = placed('paper', { box:[[-10, py1, Z_ANVIL],[46, py0, Z_PAPER]], svg: `<g data-act="paper" opacity="${f(Math.min(1, st.paper*3)*(k > 0 ? 1 - .42*k : 1))}">${ps}</g>` });
+  }
+
+  /* ---- the magazine's outside: channel, nose ---- */
+  const chanWall = rrUV(13, 12, 130, 32, 2, 3);
+  const wallA = placed('chan', pr(M3, chanWall, 8, 9, METAL, 1.1)), wallB = placed('chan', pr(M3, chanWall, 25, 26, METAL, 1.1));
+  const webTop = placed('chan', pr(M3, rectUV(13, 32, 128, 33), 8, 26, METAL, .9));
+  const noseFront = placed('chan', pr(M3, [[3.4,10],[7.6,10],[7.6,33.8],[3,33.8],[3,12]], 8, 26, METAL, 1.4));
+  const noseChA = placed('chan', pr(M3, rectUV(7.6, 10, 13.6, 33.8), 8, 9.2, METAL, .9)), noseChB = placed('chan', pr(M3, rectUV(7.6, 10, 13.6, 33.8), 24.8, 26, METAL, .9));
+  const noseTop = placed('chan', pr(M3, rectUV(9.4, 33, 13.6, 33.8), 9.2, 24.8, METAL, .7));
+  const chanPost = placed('chan', pr(M3, rectUV(13.2, 26, 15, 32), 15, 19, NICK, .7));
+  if (FP) wallB.svg += sideText(M3, 26, 76, 15.2, 'USE 26/6 STAPLES', 2.5, '#4f575b', 700);
+  else wallA.svg += sideText(M3, 8, 76, 15.2, 'USE 26/6 STAPLES', 2.5, '#4f575b', 700);
+
+  /* ---- the cap: far skin and far skirt first, near skirt and top skin last ---- */
+  const capTone = n => tone(n, m);
+  const skinIn = sheet(K3, CAP_SKIN.slice(0, 15), CAP_X0, CAP_X1, n => mix(toneI(n.map(v => -v), m), '#3a2019', .3), true);
+  const sideFace = x => { const pts = CAP_POLY.map(([u, z]) => K3(x, u, z)); return fill(pd(pts), tone(x > XC ? [1,0,0] : [-1,0,0], m)) + ink(pd(pts), 1.2); };
+  const farSide = FP ? sideFace(CAP_X0) : sideFace(CAP_X1), nearSide = FP ? sideFace(CAP_X1) : sideFace(CAP_X0);
+  let skinOut = sheet(K3, CAP_SKIN.slice(0, 15), CAP_X0, CAP_X1, capTone);
+  // grip pad and ridges on the top, a line where the skirt meets it
+  const gripPath = [46,52,58,64,70,76,82,88,92].map(u => [u, capZ(u) + .12]);
+  const gripA = gripPath.map(([u, z]) => K3(10, u, z)), gripB = gripPath.map(([u, z]) => K3(24, u, z));
+  skinOut += shape([...gripA, ...gripB.slice().reverse()], DARK.m, .9);
+  let ridges = ''; for (let u = 49; u <= 90; u += 3.4){ const z = capZ(u) + .18; ridges += pd([K3(11, u, z), K3(23, u, z)], false); }
+  skinOut += `<path d="${ridges}" fill="none" stroke="${DARK.l}" ${mw(.7)}/>`;
+  const trimX = FP ? CAP_X1 : CAP_X0, sgn = FP ? .05 : -.05;
+  const trim = shape([[60,27.4],[92,27.4],[92,37],[60,37]].map(([u, z]) => K3(trimX + sgn, u, z)), mix(tone(FP ? [1,0,0] : [-1,0,0], m), '#ffffff', .78), .8);
+  const brand = sideText(K3, trimX + sgn, 76, 30.6, 'CLINCH', 6.4, INK, 800);
+  const catchP = pr(K3, TAIL_POLY, 12.5, 21.5, DARK, .9);
+  const capInk = `<g>${hullInk([...CAP_POLY.map(([u, z]) => K3(CAP_X0, u, z)), ...CAP_POLY.map(([u, z]) => K3(CAP_X1, u, z))], 2.6)}</g>`;
+  const capFront = NOSEV ? '' : '';
+  const capFar = placed('cap', { box: bb(CAP_POLY.map(([u, z]) => K3(FP ? CAP_X0 : CAP_X1, u, z))), svg: skinIn + farSide });
+  const capNear = placed('cap', { box: bb(CAP_POLY.flatMap(([u, z]) => [K3(CAP_X0, u, z), K3(CAP_X1, u, z)])),
+    svg: act('cap', catchP.svg + nearSide + trim + brand + skinOut + capFront + capInk) });
+
+  /* ---- working parts ---- */
+  const bladeP = pr(M3, rectUV(8, tipZ, 9, tipZ + 25), 10, 24, BLADE, .9);
+  const pinU = 8.5, pinZ = tipZ + 22.6;
+  bladeP.svg += FP ? cylX(24, 24.5, LEN - pinU, pinZ, .9, NICK, toneI, .4, 8) : cylX(9.5, 10, LEN - pinU, pinZ, .9, NICK, toneI, .4, 8);
+  const blade = placed('blade', bladeP);
+  const holderC = rotUZ(pinU, pinZ, -AC);                     // the blade pin, as seen from the cap: the holder's slot must reach it
+  const holder = placed('cap', pr(K3, rrUV(holderC[0] - 5, 34.6, holderC[0] + 5, 40.8, 1, 2), 13.5, 20.5, NICK, .9));
+  // magazine insides
+  const us = []; for (let i = 0; i < st.count; i++) us.push(SLOT_U + st.gap + i*PITCH_S);
+  const usRest = us.slice(1);
+  const rail = placed('rail', pr(M3, rectUV(9.4, 14, fu + 3, 24), 11, 23, NICK, 1)), railBack = placed('rail', pr(M3, rectUV(fu + 3, 14, 110, 24), 11, 23, NICK, 1));
+  const railBlock = placed('chan', pr(M3, rectUV(110, 13, 114, 32), 9, 25, NICK, .8));
+  const stripOp = 1;
+  const legsL = placed('strip', { box: bb([M3(10, SLOT_U, Z_CROWN), M3(10.6, fu, Z_CROWN - LEG)]), svg: st.count > 1 ? wire(rows(M3, usRest, X_L, Z_CROWN, Z_CROWN - LEG)) : '' }, stripOp);
+  const legsR = placed('strip', { box: bb([M3(23.4, SLOT_U, Z_CROWN), M3(24, fu, Z_CROWN - LEG)]), svg: st.count > 1 ? wire(rows(M3, usRest, X_R, Z_CROWN, Z_CROWN - LEG)) : '' }, stripOp);
+  const crowns = placed('strip', { box: bb([M3(10, SLOT_U, Z_CROWN), M3(24, fu, Z_CROWN + .4)]), svg: st.count > 1 ? wire(usRest.map(u => pd([M3(X_L, u, Z_CROWN), M3(X_R, u, Z_CROWN)], false)).join('')) : '' }, stripOp);
+  const front = st.count > 0 ? placed('strip', { box: bb([M3(X_L, us[0], Z_CROWN), M3(X_R, us[0], Z_CROWN - LEG)]), svg: wire(stapleD(M3, us[0], Z_CROWN), GOLD.l, 1.05) }) : null;
+  // the follower rides the rail behind the strip; the spring stretches from the nose post to its hook
+  const follow = pr(M3, rrUV(fu, 15, fu + 10, 31.4, 1.4, 2), 9.4, 24.6, GOLD, 1.1);
+  follow.svg += FP ? shape([M3(24.65, fu + 3, 19), M3(24.65, fu + 7, 19), M3(24.65, fu + 7, 27), M3(24.65, fu + 3, 27)], GOLD.d, .5) : shape([M3(9.35, fu + 3, 19), M3(9.35, fu + 7, 19), M3(9.35, fu + 7, 27), M3(9.35, fu + 3, 27)], GOLD.d, .5);
+  const coil = (u0, u1, n, droop = 0) => { const pts = [], N = n*8; for (let i = 0; i <= N; i++){ const a = i/8*2*Math.PI, q = i/N; pts.push(M3(XC + 2.3*Math.cos(a), u0 + (u1 - u0)*q, 28.4 + 2.3*Math.sin(a) - droop*q*q)); } return pd(pts, false); };
+  const postU = 15, sp = st.snap > 0 ? ease(Math.min(1, st.snap)) : 0;
+  let springSvg;
+  if (!st.broken || sp === 0) springSvg = wire(coil(postU, fu, 26), st.gap > 0 && st.phase === 'up' && st.pos <= 1.08 ? '#ffb02e' : '#5f9be0', .68);
+  else { const half = (fu - postU)/2, shrink = 1 - .68*sp, a1 = postU + half*shrink, b0 = fu - half*shrink;
+    springSvg = wire(coil(postU, a1, 13, 2.6*sp), '#5f9be0', .62) + wire(coil(fu, b0, 13, 2.6*sp), '#5f9be0', .62);
+    for (const [u, dz] of [[a1, 2.6*sp], [b0, 2.6*sp]]){ const [X, Y] = P(...M3(XC + 2.3, u, 28.4 - dz)); springSvg += `<circle cx="${f(X)}" cy="${f(Y)}" r="1.5" fill="#e2483d" stroke="${INK}" stroke-width=".6"/>`; } }
+  const spring = placed('follow', { box: bb([M3(XC - 2.5, postU, 26), M3(XC + 2.5, fu, 31)]), svg: springSvg });
+  const follower = placed('follow', follow);
+  // cap leaf spring: riveted on the channel top, tip under the cap
+  const capTip = rotUZ(42, 42.7, AC);
+  const leaf2P = leafSpring(M3, bez([96, 33.2], [72, 33.6 + (capTip[1] - 42.7)*.15], capTip), 13, 21);
+  leaf2P.svg += `<g>${cyl(XC, LEN - 96, 33.2, 34, 1.2, METAL, toneI, .5, 8).replace(/^/, '')}</g>`;
+  const capLeaf = placed('capleaf', leaf2P);
+  // the staple on its way (blade drives it) or already in the paper; it leaves with the sheet
+  let shot = null;
+  if (st.shot){ const zc = crownAt(st.shotT), u = SLOT_U + pShift*0 + 0; const shiftU = pShift;
+    const F = (x, uu, z) => W3(x, uu + shiftU, z);
+    shot = placed('strip', { box: bb([F(X_L, u, zc), F(X_R, u, Z_ANVIL)]), svg: wire(stapleD(F, u, zc), GOLD.l, 1.05) }); }
+
+  /* ---- put it together ---- */
+  const castPts = [...on(PZ(0), baseUV), ...CAP_POLY.flatMap(([u, z]) => [K3(CAP_X0, u, z), K3(CAP_X1, u, z)])];
+  let s = `<defs><radialGradient id="stGlow"><stop offset="0" stop-color="#fffbe6"/><stop offset=".3" stop-color="#ffd34d" stop-opacity=".9"/><stop offset="1" stop-color="#ff9a1f" stop-opacity="0"/></radialGradient></defs>`;
+  if (apE > 0){
+    // in pieces, the groups are stacked: bottom layer first, so the order is simply the stacking order
+    const seq = [pad, base, earA, earB, web, anvil, leaf, paper, rail, railBack, legsL, legsR, crowns, front, shot, spring, follower, rivetA, pinRod, rivetB, railBlock, wallA, wallB, webTop, noseChA, noseChB, noseTop, noseFront, chanPost, blade, capLeaf, capFar, holder, capNear].filter(Boolean);
+    // early on the parts are still stacked (bottom first); once clear of each other they lie side by side, so far row first
+    const xo = p => (EX[p.g] || [0])[0]*(FP ? 1 : -1);
+    const ordered = apE < .4 ? seq : seq.map((p, i) => [p, i]).sort((a, b) => xo(a[0]) - xo(b[0]) || a[1] - b[1]).map(a => a[0]);
+    s += castShadow(on(PZ(0), baseUV).map(p => [p[0] + EX.base[0]*apE, p[1], p[2]])) + ordered.map(p => p.svg).join('');
+  } else {
+    s += castShadow(castPts);
+    s += pad.svg + base.svg + anvil.svg + leaf.svg + (paper ? paper.svg : '');
+    if (st.shot && st.paper > .01) { const zc = crownAt(st.shotT), u = SLOT_U + pShift;
+      s += `<g opacity="${f(Math.min(1, st.paper*3))}">${wire(pd([W3(X_L, u, zc), W3(X_R, u, zc)], false), GOLD.l, 1.05)}</g>`; }
+    const magParts = byDepth([wallA, wallB, webTop, railBlock, chanPost, noseChA, noseChB, noseTop].map(p => ({ box: p.box, svg: p.svg })));
+    const near = p => `<g opacity="${f(shellOp)}">${p}</g>`;
+    const capOp = 1 - .62*k;
+    const backing = k > 0 ? `<g opacity="${f(.85*k)}">${fill(pd(CAP_POLY.map(([u, z]) => K3(FP ? CAP_X0 : CAP_X1, u, z))), mix(m.l, '#f2efe7', .12))}</g>` : '';
+    const head = `<g opacity="${f(capOp)}">${capFar.svg}</g>` + backing + near(magParts) + near(noseFront.svg) + (k < 1 ? `<g opacity="${f(1 - k)}">${blade.svg}</g>` : '') + `<g opacity="${f(capOp)}">${capNear.svg}</g>`;
+    const earFar = FP ? earA.svg + rivetA.svg : earB.svg + rivetB.svg, earNear = FP ? earB.svg + rivetB.svg : earA.svg + rivetA.svg;
+    s += earFar + web.svg + head + earNear;
+    if (k > 0) s += `<g opacity="${f(.55*k)}">${capInk}</g>`;
+  }
+  if (k > 0 && apE === 0){
+    // everything that works, on top of the ghost
+    const farLegs = FP ? legsL : legsR, nearLegs = FP ? legsR : legsL;
+    const stripSet = farLegs.svg + rail.svg + crowns.svg + nearLegs.svg + (front ? front.svg : '');
+    const mid = NOSEV ? railBack.svg + follower.svg + stripSet + spring.svg : stripSet + follower.svg + railBack.svg + spring.svg;
+    const seq = NOSEV ? mid + pinRod.svg + capLeaf.svg + holder.svg + (shot ? shot.svg : '') + blade.svg
+      : holder.svg + blade.svg + (shot ? shot.svg : '') + mid + pinRod.svg + capLeaf.svg;
+    const missing = st.broken && st.gap > 0 ? `<path d="${stapleD(M3, SLOT_U, Z_CROWN)}" fill="none" stroke="#e2483d" ${mw(.8)} stroke-dasharray="1.1 1"/>` : '';
+    let fx = '';
+    if (st.shearFx > 0) fx += glow(M3(XC, SLOT_U, Z_CROWN), 12, .85*st.shearFx);
+    if (st.anvilHit > 0) fx += glow([10.3, LEN - 8.5, Z_ANVIL + .3], 7, .8*st.anvilHit) + glow([23.7, LEN - 8.5, Z_ANVIL + .3], 7, .8*st.anvilHit);
+    if (st.broken && st.snap < .7){ const q = 1 - st.snap/.7; fx += glow(M3(XC, (postU + fu)/2, 28.4), 30, q); }
+    s += `<g opacity="${f(k)}">${seq}${missing}${fx}</g>`;
+  }
+
+  /* ---- labels ---- */
+  const anyZ = Math.max(0, apE);
+  const slotP = st.count > 0 ? M3(XC, us[0], Z_CROWN + .4) : M3(XC, SLOT_U, Z_CROWN);
+  const insideItems = [
+    { at: at('blade', M3(XC + 7, 8.5, tipZ + 9)), text: 'HAMMER BLADE', on: t > 0 && t < 1 },
+    { at: at('chan', M3(26, 8, 17)), text: 'NOSE', on: st.pos >= 1 },
+    { at: at('anvil', [26, LEN - 8.5, Z_ANVIL]), text: 'ANVIL', on: st.pos > 2.9 },
+    { at: at('strip', st.shot ? W3(X_R, SLOT_U + pShift, crownAt(st.shotT)) : slotP), text: 'STAPLE', on: !!st.shot && st.pos > 1 },
+    { at: at('strip', M3(X_R, Math.min(fu - 8, 40), Z_CROWN)), text: 'STAPLE STRIP', on: st.gap > 0 && st.phase === 'up' },
+    { at: at('rail', M3(23, Math.min(100, fu + 18), 19)), text: 'RAIL', on: false },
+    { at: at('follow', M3(24.6, fu + 5, 25)), text: 'FOLLOWER', on: st.gap > 0 && st.phase === 'up' },
+    { at: at('follow', M3(XC + 2.3, (postU + fu)/2, 28.4)), text: 'FOLLOWER SPRING', on: !!st.broken },
+    { at: at('capleaf', M3(17, 70, 35)), text: 'CAP SPRING', on: st.pos > 1 },
+    { at: at('leaf', W3(21.5, 62, 8)), text: 'BASE SPRING', on: st.pos > 0 && st.pos <= 1 },
+    { at: at('pin', [32, LEN - HU, HZ]), text: 'HINGE PIN', on: st.pos > 0 },
+    { at: at('chan', M3(26, 105, 24)), text: 'MAGAZINE', on: false },
+    { at: at('cap', K3(CAP_X1, 108, 34)), text: 'CAP', on: st.pos > 0 },
+    { at: at('cap', K3(XC, 135, 31)), text: 'RELEASE CATCH', on: false },
+    { at: at('base', [BX, LEN - 86, 4.5]), text: 'BASE', on: false },
+    ...(st.broken && st.gap > 0 ? [{ at: M3(XC, SLOT_U, 20), text: 'EMPTY SLOT', on: true }] : []),
+  ];
+  const bounds = [0, 28, 10, LEN, 0, 72];
+  s += `<g>${k > .6 ? xrCallouts(insideItems, bounds)
+    : xrCallouts([{ at: K3(CAP_X1, 108, 34), text: 'CAP', on: st.pos > 0 }, { at: M3(26, 8, 17), text: 'NOSE', on: st.pos >= 1 }, { at: [32, LEN - HU, HZ], text: 'HINGE PIN', on: st.pos > 0 },
+        { at: [BX, LEN - 86, 4.5], text: 'BASE', on: false }, ...(st.paper > .5 ? [] : [{ at: [26, LEN - 8.5, Z_ANVIL], text: 'ANVIL', on: false }]), { at: K3(XC, 135, 31), text: 'RELEASE CATCH', on: false }], bounds)}</g>`;
+  const zs = 1 + (TIGHT - 1)*(1 - apE);                       // in pieces it needs the whole frame
+  if (zs !== 1){ const c = P(XC, 70, 30), v = P(17, 74, 38);
+    return `<g transform="translate(${f(v[0])} ${f(v[1])}) scale(${zs.toFixed(3)}) translate(${f(-c[0])} ${f(-c[1])})">${s}</g>`; }
+  return s;
+}
+
+/* ---------- behaviour (one state object, one clock) ---------- */
+let loopOn = false, apAnim = 0;
+function stepSim(st, dt){
+  // the press
+  if (st.phase === 'down'){
+    const i = Math.min(3, Math.floor(st.pos));
+    st.pos = Math.min(st.goal, st.pos + dt/(SEG[i]*st.rate));
+    fireCheck(st);
+    if (st.pos >= st.goal){
+      if (st.auto && st.goal === 4){ st.phase = 'hold'; st.t0 = st.simT; }
+      else st.phase = 'wait';
+      if (st.pos >= 4 && !st.shot) blank(st);
+    }
+  } else if (st.phase === 'hold'){
+    if (st.simT - st.t0 > 240) st.phase = 'up';
+  } else if (st.phase === 'up'){
+    st.pos = st.pos > 1 ? Math.max(1, st.pos - dt/(620*st.upRate)) : Math.max(0, st.pos - dt/(650*st.upRate));
+    if (st.pos <= 1.08 && st.gap > 0 && !st.broken) st.gap = Math.max(0, st.gap - dt/(FEED_MS/PITCH_S));
+    if (st.pos <= 0 && st.gap === 0 || st.pos <= 0 && st.broken){ st.phase = 'idle'; st.pos = 0; if (st.paperQ){ st.paperQ = false; slidePaper(st); } }
+  }
+  st.anvilHit = Math.max(st.pos > 3 && st.pos < 4 && st.shot ? 1 : 0, st.anvilHit - dt/500);
+  st.shearFx = Math.max(0, st.shearFx - dt/600);
+  // the spring recoiling when it snaps
+  if (st.broken && st.snap < 1) st.snap = Math.min(1, st.snap + dt/420);
+  // paper in or out; a used sheet goes out and a fresh one comes in
+  if (st.paper !== st.paperT){
+    const g = Math.sign(st.paperT - st.paper);
+    st.paper = g > 0 ? Math.min(1, st.paper + dt/700) : Math.max(0, st.paper - dt/500);
+    if (st.paper === 0 && st.paperNext){ st.paperNext = false; st.paperT = 1; st.shot = 0; st.shotT = 0; }
+    else if (st.paper === 0) { st.shot = 0; st.shotT = 0; }
+  }
+}
+function fireCheck(st){
+  const t = tOf(st.pos);
+  if (st.shot === 0 && t >= .04 && st.gap === 0 && st.count > 0){ st.shot = 1; st.count--; st.gap = PITCH_S; st.shearFx = 1; }
+  if (st.shot === 1 && st.phase === 'down') st.shotT = Math.max(st.shotT, t);
+}
+function blank(st){ ui.flash(st.broken ? 'Click. Nothing in the slot.' : 'Click. No staple there.', 2000); }
+function busy(st){ return st.phase !== 'idle' && st.phase !== 'wait' || st.paper !== st.paperT || (st.broken && st.snap < 1) || st.anvilHit > 0 || st.shearFx > 0; }
+function runLoop(){
+  if (loopOn) return; loopOn = true;
+  let last = performance.now();
+  ui.animate(() => { const st = ui.st, now = performance.now(), dt = Math.min(100, now - last); last = now;
+    if (st.frozen){ loopOn = false; return false; }           // Freeze time: the mechanism's clock stops; the camera still turns
+    st.simT += dt; stepSim(st, dt);
+    const b = busy(st); if (!b) loopOn = false;
+    return b; });
+}
+function canStart(st){
+  if (st.frozen){ ui.flash('Time is frozen'); return false; }
+  if (st.paper < .9 && st.pos === 0){ ui.flash('Slide in some paper first'); return false; }
+  if (st.shot && st.pos === 0){ ui.flash('Slide in a fresh sheet first'); return false; }
+  if (st.count === 0 && st.pos === 0){ ui.flash('Out of staples'); }
+  return true;
+}
+function pressDown(st){
+  if (st.phase === 'wait' && st.pos >= 4){ st.phase = 'up'; st.upRate = 1; return runLoop(); }
+  if (st.phase === 'wait'){ st.goal = 4; st.auto = true; st.rate = .4; st.upRate = .55; st.phase = 'down'; return runLoop(); }
+  if (st.phase !== 'idle' || !canStart(st)) return;
+  st.phase = 'down'; st.goal = 4; st.auto = true; st.rate = .35; st.upRate = .55; runLoop();
+}
+function pressLittle(st){
+  if (st.frozen) return ui.flash('Time is frozen');
+  if (st.phase === 'wait' && st.pos >= 4){ st.phase = 'up'; st.upRate = SLOW > 1 ? 1.5 : 1; return runLoop(); }
+  if (st.phase === 'idle' && !canStart(st)) return;
+  if (st.phase !== 'idle' && st.phase !== 'wait') return;
+  st.goal = Math.min(4, Math.floor(st.pos + 1e-6) + 1); st.auto = false; st.rate = SLOW; st.phase = 'down'; runLoop();
+}
+function slidePaper(st){
+  if (st.frozen) return ui.flash('Time is frozen');
+  if (st.phase === 'up' || st.phase === 'hold'){ st.paperQ = true; return; }   // still lifting: the sheet goes as soon as the nose is clear
+  if (st.pos > 0) return ui.flash('Let go first');
+  if (st.count === 0){ st.count = COUNT0; st.gap = 0; ui.flash('New strip loaded', 1400); }
+  if (st.paperT === 0 && st.paper === 0){ st.paperT = 1; st.shot = 0; st.shotT = 0; }
+  else if (st.paper > 0){ st.paperT = 0; st.paperNext = true; }
+  runLoop();
+}
+function breakSpring(st){
+  if (st.frozen) return ui.flash('Time is frozen');
+  st.broken = !st.broken;
+  if (st.broken){ st.snap = 0; ui.flash('The follower spring has snapped', 2000); }
+  else { st.snap = 0; ui.flash('New spring fitted', 2000); st.gap = 0; }
+  runLoop();
+}
+function freezeTime(st){
+  st.frozen = !st.frozen;
+  ui.flash(st.frozen ? 'Time frozen' : 'Time running', 1200);
+  if (!st.frozen) runLoop();
+}
+function takeApart(st){
+  const xrb = document.getElementById('xrb');
+  if (!st.xrT){ if (xrb) xrb.click(); st.apT = 1; } else st.apT = st.apT ? 0 : 1;
+  const id = ++apAnim;
+  ui.animate(dt => { if (id !== apAnim) return false;
+    st.ap = Math.max(0, Math.min(1, st.ap + (st.apT ? dt/1.5 : -dt/.6)));
+    return st.ap !== st.apT; });
+}
+
+ui = mountFigure({
+  fig:'05', turn:'full', title:'Stapler', hint:'',
+  idea:'One push does two jobs: a thin blade drives a single staple through the paper, and an anvil folds its legs. Letting go lets a spring bring up the next.',
+  size:[48, 150, 76], center:[17, 74], palette:'tomato',
+  // pos: 0..4 the press (see tOf); gap: how far the strip sits back from the slot; shot: 1 once a staple has left the strip
+  state:{ phase:'idle', goal:0, pos:0, auto:false, rate:1, upRate:1, t0:0, simT:0, count:COUNT0, gap:0, shot:0, shotT:0,
+    paper:0, paperT:0, paperNext:false, paperQ:false, frozen:false, broken:false, snap:0, ap:0, apT:0, anvilHit:0, shearFx:0 },
+  scene,
+  readout: st => (st.frozen ? 'time frozen · ' : '') + (st.broken ? 'follower spring broken · ' : '')
+    + (st.pos >= 4 ? 'legs folded' : st.pos > 3 ? 'anvil folding the legs' : st.pos > 2 ? 'legs going through the paper' : st.pos > 1 ? (st.shot ? 'staple sheared off the strip' : 'blade going down') : st.pos > 0 ? 'nose coming down' : st.paper > .9 ? 'ready' : 'slide in some paper')
+    + ` · ${st.count} staples left`,
+  buttons:[
+    { label:'Slide in paper', onClick:(st) => slidePaper(st) },
+    { label:'Press down', onClick:(st) => pressDown(st) },
+    { label:'Press a little', onClick:(st) => pressLittle(st) },
+    { label:'Take apart', onClick:(st) => takeApart(st) },
+    { label:'Freeze time', onClick:(st) => freezeTime(st) },
+    { label:'Break the spring', onClick:(st) => breakSpring(st) },
+  ],
+  acts:{ cap:(st) => pressDown(st), paper:(st) => slidePaper(st) },
+  params:(st, q) => {
+    if (q.has('pos')){ st.pos = +q.get('pos'); st.phase = st.pos > 0 ? 'wait' : 'idle'; if (tOf(st.pos) >= .04){ st.shot = 1; st.shotT = tOf(st.pos); st.count--; st.gap = PITCH_S; } }
+    if (q.get('paper') === '1'){ st.paper = st.paperT = 1; }
+    if (q.has('count')) st.count = +q.get('count');
+    if (q.get('apart') === '1'){ st.ap = st.apT = 1; st.xr = st.xrT = 1; }
+    if (q.get('freeze') === '1') st.frozen = true;
+    if (q.get('broken') === '1'){ st.broken = true; st.snap = 1; }
+  },
+});
+addEventListener('keydown', e => {
+  if (/input|textarea|button/i.test(e.target.tagName)) return;
+  if (e.key !== ' ' && e.key !== 'Enter') return;
+  pressDown(ui.st); e.preventDefault(); ui.render();
+});
+xrMount(() => ui, () => '');
+</script><style>@media (max-width:560px),(pointer:coarse){#art{filter:none!important}.ctl:has(#wb){display:none!important}}</style><style>@media (max-width:560px){html body .kpad{width:100%;box-sizing:border-box;justify-content:space-between;gap:10px;margin:10px 0 0;padding:0;border:0;background:none;box-shadow:none}
+html body .kpad .dp{display:flex;gap:8px}html body .kpad .hub{display:none}
+html body .kpad .k{width:46px;height:42px;font-size:14px;border-radius:9px}
+html body .kpad .go{width:auto;height:42px;padding:0 26px;border-radius:999px;flex-direction:row;font-size:13px;box-shadow:0 3px 0 var(--ink),inset 0 -4px 0 rgba(0,0,0,.18)}
+html body .kpad .go small{display:none}html body .kpad .go.down{transform:translateY(2px);box-shadow:0 1px 0 var(--ink),inset 0 -2px 0 rgba(0,0,0,.18)}}</style>
+<script>requestAnimationFrame(() => { const o = { "◀": 0, "▲": 1, "▼": 2, "▶": 3 }; for (const k of document.querySelectorAll(".kpad .k")) k.style.order = o[k.textContent] ?? 0; });</script><style>@media (max-width:560px){.vset{margin:8px 0 2px!important}}</style><script>requestAnimationFrame(() => { const v = document.querySelector(".vset"), s = document.getElementById("stats"), z = document.querySelector(".zwrap"); if (!v) return; if (z && z.parentNode === v.parentNode){ const kp = document.querySelector(".kpad"); if (kp && innerWidth <= 560){ z.after(kp); kp.after(v); } else z.after(v); } else if (s && s.parentNode) s.parentNode.insertBefore(v, s); });</script><script>(() => { const fit = () => { const fig = document.getElementById("fig"); if (!fig) return;
+  fig.style.maxHeight = ""; if (innerWidth <= 560) return;
+  const extra = document.documentElement.scrollHeight - fig.clientHeight, room = innerHeight - extra - 12;
+  if (room < fig.clientHeight) fig.style.maxHeight = Math.max(320, room) + "px"; };
+  addEventListener("load", () => requestAnimationFrame(fit)); addEventListener("resize", fit); setTimeout(fit, 400); })();</script><style>.zwrap{position:relative}.zwrap.on{overflow:hidden}@media (min-width:561px){.zwrap.on{overflow:visible}html.zoomed,html.zoomed body{overflow:hidden}}.zwrap #fig{transform-origin:0 0}
+.zchip{position:absolute;right:2px;bottom:6px;display:flex;align-items:center;gap:2px;font:600 11px ui-monospace,Menlo,monospace;
+ background:rgba(242,239,231,.88);border:1px solid rgba(35,30,22,.25);border-radius:999px;padding:2px;z-index:3;user-select:none}
+.zchip button{all:unset;cursor:pointer;min-width:22px;height:22px;line-height:22px;text-align:center;border-radius:999px;color:#231e16}
+.zchip button:hover{background:rgba(35,30,22,.08)}.zchip .zp{min-width:44px}</style>
+<script>(() => { const fig = document.getElementById("fig"); if (!fig) return;
+  const wrap = document.createElement("div"); wrap.className = "zwrap"; fig.parentNode.insertBefore(wrap, fig); wrap.appendChild(fig);
+  const chip = document.createElement("div"); chip.className = "zchip";
+  chip.innerHTML = '<button class="zm" aria-label="Zoom out">−</button><button class="zp" aria-label="Reset zoom">100%</button><button class="zi" aria-label="Zoom in">+</button>';
+  wrap.appendChild(chip);
+  let s = 1, tx = 0, ty = 0;
+  const box = () => ({ w: fig.clientWidth, h: fig.clientHeight });
+  const apply = () => { const { w, h } = box(); s = Math.min(5, Math.max(1, s));
+    if (s <= 1.001){ s = 1; tx = ty = 0; } else { tx = Math.min(0, Math.max(w - w*s, tx)); ty = Math.min(0, Math.max(h - h*s, ty)); }
+    fig.style.transform = s === 1 ? "" : `translate(${tx}px,${ty}px) scale(${s})`; wrap.classList.toggle("on", s > 1); document.documentElement.classList.toggle("zoomed", s > 1);   /* desktop: nothing is cut off, the page just does not scroll while zoomed */
+    chip.querySelector(".zp").textContent = Math.round(s*100) + "%"; grain(); };
+  // the paper grain is noise in drawing units: zoomed, it would blow up into blotches, so its frequency rises with the
+  // zoom and it stays the same fine grain on screen (the filter is rebuilt on resize, so this re-applies then too)
+  const grain = () => { const fl = document.getElementById("hand"); if (!fl) return;
+    const ts = [...fl.querySelectorAll("feTurbulence")]; if (!ts.length) return;
+    const g = ts.find(t => t.getAttribute("result") === "n1") || ts.reduce((a, b) => parseFloat(b.getAttribute("baseFrequency")) > parseFloat(a.getAttribute("baseFrequency")) ? b : a);
+    if (!g.dataset.f0) g.dataset.f0 = g.getAttribute("baseFrequency");
+    const v = (parseFloat(g.dataset.f0) * s).toFixed(4); if (g.getAttribute("baseFrequency") !== v) g.setAttribute("baseFrequency", v); };
+  const fd = document.getElementById("fdefs"); if (fd) new MutationObserver(() => grain()).observe(fd, { childList: true, subtree: true });
+  const zoomAt = (k, px, py) => { const s2 = Math.min(5, Math.max(1, s*k)); tx = px - (px - tx)*s2/s; ty = py - (py - ty)*s2/s; s = s2; apply(); };
+  const local = e => { const r = wrap.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; };
+  wrap.addEventListener("wheel", e => {
+    if (e.ctrlKey || e.metaKey){ e.preventDefault(); const [x, y] = local(e); zoomAt(Math.exp(-Math.max(-50, Math.min(50, e.deltaY))*.006), x, y);   /* a wheel notch ~1.35x, a pinch stays smooth */ }
+    else if (s > 1){ e.preventDefault(); tx -= e.deltaX; ty -= e.deltaY; apply(); } }, { passive: false });
+  const center = () => { const { w, h } = box(); return [w/2, h/2]; };
+  chip.querySelector(".zi").onclick = () => zoomAt(1.5, ...center());
+  chip.querySelector(".zm").onclick = () => zoomAt(1/1.5, ...center());
+  chip.querySelector(".zp").onclick = () => { s = 1; apply(); };
+  chip.addEventListener("pointerdown", e => e.stopPropagation());
+  // two fingers: pinch to zoom and move to pan; the figure's own one-finger turn waits while they are down
+  const pts = new Map(); let pinch = null;
+  const two = () => { const [a, b] = [...pts.values()]; return { d: Math.hypot(a.x - b.x, a.y - b.y), x: (a.x + b.x)/2, y: (a.y + b.y)/2 }; };
+  wrap.addEventListener("pointerdown", e => { if (e.pointerType !== "touch") return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pts.size === 2){ pinch = two(); e.stopPropagation(); } }, true);
+  wrap.addEventListener("pointermove", e => { if (!pts.has(e.pointerId)) return; pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pinch && pts.size === 2){ e.stopPropagation(); e.preventDefault(); const n = two(), r = wrap.getBoundingClientRect();
+      tx += n.x - pinch.x; ty += n.y - pinch.y; zoomAt(n.d / pinch.d, n.x - r.left, n.y - r.top); pinch = n; } }, true);
+  const up = e => { pts.delete(e.pointerId); if (pts.size < 2) pinch = null; };
+  wrap.addEventListener("pointerup", up, true); wrap.addEventListener("pointercancel", up, true);
+  addEventListener("resize", apply);
+})();</script><style>.toast{position:absolute!important;left:50%!important;right:auto!important;top:6%!important;bottom:auto!important;z-index:4!important;
+  transform:translate(-50%,8px)!important;opacity:0!important;pointer-events:none!important;display:flex!important;align-items:center;gap:8px;
+  width:max-content;max-width:min(86%,440px);white-space:normal!important;font:600 12.5px/1.35 ui-monospace,Menlo,monospace!important;
+  letter-spacing:.01em!important;text-transform:none!important;color:#231e16!important;background:#fff1bf!important;
+  border:1px solid rgba(35,30,22,.28)!important;border-radius:8px!important;box-shadow:0 8px 22px rgba(35,30,22,.16)!important;
+  padding:7px 13px 7px 9px!important;transition:opacity .18s ease,transform .18s ease!important}
+.toast::before{content:"!";flex:none;width:17px;height:17px;border-radius:50%;background:#231e16;color:#fff1bf;font:800 11px/17px ui-monospace,Menlo,monospace;text-align:center}
+.toast.show{opacity:1!important;transform:translate(-50%,0)!important}</style>
+<script>(() => { const cap = () => { const t = document.getElementById("toast"); if (!t) return; const s = t.textContent;
+  if (s && s[0] !== s[0].toUpperCase()) t.textContent = s[0].toUpperCase() + s.slice(1); };
+  let seen = null; const watch = () => { const t = document.getElementById("toast"); if (!t || t === seen) return; seen = t;
+    const zw = document.querySelector(".zwrap"); if (zw && t.parentNode !== zw) zw.appendChild(t);   // sits on the figure itself
+    new MutationObserver(cap).observe(t, { childList: true, characterData: true, subtree: true }); cap(); };
+  watch(); const st = document.querySelector(".stage"); if (st) new MutationObserver(watch).observe(st, { childList: true }); })();</script><script>(() => { const fix = () => { const art = document.getElementById('art'); if (!art) return;
+    for (const el of art.querySelectorAll('[fill="#41538f" i]')){ let top = null, a = el.parentElement;
+      while (a && a !== art){ const o = a.getAttribute('opacity'); if (o !== null && +o < 1) top = a; a = a.parentElement; }
+      if (top) top.parentNode.insertBefore(el, top); } };
+  const go = () => { const art = document.getElementById('art'); if (!art) return setTimeout(go, 50); fix(); new MutationObserver(fix).observe(art, { childList: true }); };
+  if (document.readyState === 'loading') addEventListener('DOMContentLoaded', go); else go(); })();</script><style>.lgd{display:none}@media (max-width:560px){html:not(.nolabels) .lgd.has{display:grid}}
+.lgd{grid-template-columns:1fr 1fr;gap:2px 8px;margin:4px 0 12px;font:700 10.5px/1.25 ui-monospace,Menlo,monospace;letter-spacing:.03em;color:#231e16}
+.lgd button{all:unset;display:flex;align-items:center;gap:6px;cursor:pointer;padding:4px;border-radius:7px;-webkit-tap-highlight-color:transparent}
+.lgd b{flex:none;min-width:17px;height:17px;padding:0 3px;box-sizing:border-box;border-radius:999px;border:1.2px solid #231e16;background:#fff4d6;text-align:center;font:800 10px/15px ui-monospace,Menlo,monospace}
+.lgd .on b{background:var(--accent,#f4b829)}.lgd .sel{background:rgba(35,30,22,.09)}.lgd .sel b{background:#231e16;color:#fff4d6}</style>
+<script>(() => { const fig = document.getElementById("fig"); if (!fig) return;
+  const lg = document.createElement("div"); lg.className = "lgd"; const at = document.querySelector(".zwrap") || fig; at.parentNode.insertBefore(lg, at.nextSibling);
+  const hs = document.createElement("style"); document.head.appendChild(hs);
+  let sig = "", sel = 0, q = 0, names = "", num = new Map();
+  // the figure's own numbers count every label it has ever drawn; here they are reset to 1, 2, 3... down the left
+  // column then the right, each time the set of labels changes (so they hold still while the figure turns)
+  const renum = () => { if (innerWidth > 560) return; const gs = [...fig.querySelectorAll(".tag[data-t]")];
+    const key = gs.map(g => g.dataset.t).sort().join("|");
+    if (key !== names){ names = key; num = new Map(); const vb = fig.viewBox.baseVal, cx = vb.x + vb.width/2;
+      const at = g => { const r = g.querySelector("rect"); return r ? [+r.getAttribute("x") + r.getAttribute("width")/2, +r.getAttribute("y")] : [0, 0]; };
+      gs.map(g => [g.dataset.t, ...at(g)]).sort((a, b) => ((a[1] > cx) - (b[1] > cx)) || a[2] - b[2]).forEach(([t]) => { if (!num.has(t)) num.set(t, num.size + 1); }); }
+    for (const g of gs){ const n = String(num.get(g.dataset.t)); if (g.dataset.n !== n){ g.dataset.n = n; const t = g.querySelector("text"); if (t) t.textContent = n; } } };
+  const mark = () => { hs.textContent = sel ? `#fig .tag[data-n="${sel}"] rect{fill:#231e16!important}#fig .tag[data-n="${sel}"] text{fill:#fff4d6}#fig .tag[data-n="${sel}"] path{stroke-width:2.4}` : "";
+    for (const x of lg.children) x.classList.toggle("sel", +x.dataset.n === sel); };
+  const upd = () => { q = 0; const m = new Map();
+    if (innerWidth <= 560) for (const g of fig.querySelectorAll(".tag[data-n]")){ const n = +g.dataset.n; if (!m.has(n)) m.set(n, [g.dataset.t, g.classList.contains("on")]); }
+    const a = [...m].sort((x, y) => x[0] - y[0]), s = JSON.stringify(a); if (s === sig) return; sig = s;
+    lg.classList.toggle("has", a.length > 0);
+    lg.innerHTML = a.map(([n, [t, on]]) => `<button data-n="${n}" class="${on ? "on" : ""}"><b>${n}</b><span>${t}</span></button>`).join(""); mark(); };
+  lg.addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; sel = sel === +b.dataset.n ? 0 : +b.dataset.n; mark(); });
+  new MutationObserver(() => { renum(); if (!q) q = requestAnimationFrame(upd); }).observe(fig, { childList: true, subtree: true }); renum();
+  addEventListener("resize", () => { if (!q) q = requestAnimationFrame(upd); }); upd(); })();</script><style id="inkside-bar-css">
+#inkside-bar{position:fixed;top:0;left:0;right:0;z-index:1000;height:44px;display:flex;align-items:center;gap:12px;
+  padding:0 14px;padding-top:env(safe-area-inset-top);box-sizing:content-box;background:#f2efe7;border-bottom:1.5px solid #231e16;
+  font:13px/1 ui-monospace,SFMono-Regular,Menlo,monospace;color:#231e16}
+#inkside-bar a{flex:none;display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border:1.5px solid #231e16;border-radius:999px;
+  background:#f4b829;color:#231e16;text-decoration:none;font-weight:700;letter-spacing:.08em;text-transform:uppercase;font-size:11.5px;box-shadow:0 2px 0 #231e16}
+#inkside-bar a:active{transform:translateY(2px);box-shadow:none}
+#inkside-bar .t{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:Georgia,"Times New Roman",serif;font-weight:700;font-size:16px}
+#inkside-bar .n{font-family:ui-monospace,Menlo,monospace;font-weight:700;font-size:11px;letter-spacing:.12em;margin-right:8px;color:#857d6e}
+body{padding-top:calc(58px + env(safe-area-inset-top))!important}
+@media (min-width:561px){body{padding-top:calc(68px + env(safe-area-inset-top))!important}}
+body > header{display:none!important}
+</style>
+<script>(() => { const b = document.createElement("nav"); b.id = "inkside-bar"; b.setAttribute("aria-label", "Inkside");
+  b.innerHTML = '<a href="../index.html">&larr; Inkside</a><span class="t"><span class="n">FIG. 05</span>The stapler</span>';
+  document.body.prepend(b); document.title = "Fig. 05 \u00b7 The stapler \u00b7 Inkside";
+  addEventListener("load", () => { document.title = "Fig. 05 \u00b7 The stapler \u00b7 Inkside"; }); })();</script>
+</body></html>
